@@ -6,6 +6,9 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,9 +69,17 @@ func (a *App) ChangeAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	stagingDir := filepath.Join(a.Config.WallpaperDir, ".current-"+time.Now().Format("20060102-150405"))
+	applied := false
+	defer func() {
+		if !applied {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
+
 	paths := make([]string, 0, len(photos))
 	for i, p := range photos {
-		path, err := a.Client.Download(ctx, p, a.Config.WallpaperDir, a.Config.MinWidth, a.Config.MinHeight, i)
+		path, err := a.Client.Download(ctx, p, stagingDir, a.Config.MinWidth, a.Config.MinHeight, i)
 		if err != nil {
 			return err
 		}
@@ -79,6 +90,10 @@ func (a *App) ChangeAll(ctx context.Context) error {
 	if err := wallpaper.SetDesktops(ctx, paths); err != nil {
 		return err
 	}
+	applied = true
+	if err := cleanWallpaperCache(a.Config.WallpaperDir, paths); err != nil {
+		a.logf("cache cleanup failed: %v", err)
+	}
 
 	saved := make([]unsplash.SavedPhoto, 0, len(photos))
 	for i, p := range photos {
@@ -86,6 +101,49 @@ func (a *App) ChangeAll(ctx context.Context) error {
 	}
 	_ = SaveState(State{LastChangedAt: time.Now(), Photos: saved})
 	a.logf("updated %d workspace wallpaper(s)", desktops)
+	return nil
+}
+
+func cleanWallpaperCache(dir string, keepPaths []string) error {
+	if len(keepPaths) == 0 || dir == "" {
+		return nil
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	keepRoots := map[string]bool{}
+	for _, path := range keepPaths {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(absDir, absPath)
+		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
+			continue
+		}
+		root := strings.Split(rel, string(os.PathSeparator))[0]
+		if root != "" && root != "." {
+			keepRoots[root] = true
+		}
+	}
+
+	for _, entry := range entries {
+		if keepRoots[entry.Name()] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(absDir, entry.Name())); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -26,16 +26,24 @@ type Config struct {
 }
 
 func Default() Config {
-	home, _ := os.UserHomeDir()
 	return Config{
 		Query:           "nature landscape",
 		ChangeTime:      "02:00",
 		MinWidth:        3840,
 		MinHeight:       2160,
-		WallpaperDir:    filepath.Join(home, "Pictures", AppName),
+		WallpaperDir:    DefaultWallpaperDir(),
 		ContentFilter:   "high",
 		ShortcutEnabled: true,
 	}
+}
+
+func DefaultWallpaperDir() string {
+	base, err := os.UserCacheDir()
+	if err == nil && base != "" {
+		return filepath.Join(base, AppName, "wallpapers")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "Caches", AppName, "wallpapers")
 }
 
 func Dir() (string, error) {

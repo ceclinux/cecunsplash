@@ -7,6 +7,7 @@ A macOS terminal app written in Go that runs as a background LaunchAgent and cha
 - Daily wallpaper change at **02:00** by default.
 - If the Mac is offline at the scheduled time, it waits until network access is available.
 - Downloads only Unsplash photos whose original metadata is at least **3840x2160**.
+- Uses a cache directory and removes old wallpaper images after each successful change, keeping only the current applied files required by macOS.
 - Sets a separate image for each macOS Space/workspace detected from Mission Control preferences, with System Events plus Dock wallpaper database support.
 - Manual change shortcut while the service is running: **Shift + Control + Command + D**.
 - No third-party Go dependencies.
@@ -50,9 +51,10 @@ Optional settings:
   --access-key YOUR_UNSPLASH_ACCESS_KEY \
   --query "mountains ocean" \
   --time 02:00 \
-  --dir ~/Pictures/cecunsplash
+  --dir ~/Library/Caches/cecunsplash/wallpapers
 ```
 
+The default wallpaper cache is `~/Library/Caches/cecunsplash/wallpapers`.
 Configuration is stored at `~/.config/cecunsplash/config.json`.
 
 ## Run once
