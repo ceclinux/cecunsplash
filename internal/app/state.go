@@ -13,6 +13,7 @@ import (
 type State struct {
 	LastChangedAt time.Time             `json:"last_changed_at"`
 	Photos        []unsplash.SavedPhoto `json:"photos"`
+	UsedPhotoIDs  []string              `json:"used_photo_ids"`
 }
 
 func statePath() (string, error) {

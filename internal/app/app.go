@@ -65,7 +65,8 @@ func (a *App) ChangeAll(ctx context.Context) error {
 	}
 	a.logf("found %d desktop workspace(s)", desktops)
 
-	photos, err := a.fetchEnoughPhotos(ctx, desktops)
+	state := LoadState()
+	photos, err := a.fetchEnoughPhotos(ctx, desktops, state)
 	if err != nil {
 		return err
 	}
@@ -99,7 +100,11 @@ func (a *App) ChangeAll(ctx context.Context) error {
 	for i, p := range photos {
 		saved = append(saved, unsplash.SavedPhoto{Photo: p, Path: paths[i]})
 	}
-	_ = SaveState(State{LastChangedAt: time.Now(), Photos: saved})
+	history := updatedPhotoHistory(state, photos)
+	state.LastChangedAt = time.Now()
+	state.Photos = saved
+	state.UsedPhotoIDs = history
+	_ = SaveState(state)
 	a.logf("updated %d workspace wallpaper(s)", desktops)
 	return nil
 }
@@ -147,12 +152,56 @@ func cleanWallpaperCache(dir string, keepPaths []string) error {
 	return nil
 }
 
-func (a *App) fetchEnoughPhotos(ctx context.Context, needed int) ([]unsplash.Photo, error) {
+const maxPhotoHistory = 500
+
+func usedPhotoIDSet(state State) map[string]bool {
+	used := make(map[string]bool, len(state.UsedPhotoIDs)+len(state.Photos))
+	for _, id := range state.UsedPhotoIDs {
+		if id != "" {
+			used[id] = true
+		}
+	}
+	// Backward-compatible migration for state files written before used_photo_ids existed.
+	for _, saved := range state.Photos {
+		if saved.Photo.ID != "" {
+			used[saved.Photo.ID] = true
+		}
+	}
+	return used
+}
+
+func updatedPhotoHistory(state State, photos []unsplash.Photo) []string {
+	history := make([]string, 0, maxPhotoHistory)
 	seen := map[string]bool{}
+	appendID := func(id string) {
+		if id == "" || seen[id] || len(history) >= maxPhotoHistory {
+			return
+		}
+		seen[id] = true
+		history = append(history, id)
+	}
+
+	for _, photo := range photos {
+		appendID(photo.ID)
+	}
+	for _, id := range state.UsedPhotoIDs {
+		appendID(id)
+	}
+	for _, saved := range state.Photos {
+		appendID(saved.Photo.ID)
+	}
+	return history
+}
+
+func (a *App) fetchEnoughPhotos(ctx context.Context, needed int, state State) ([]unsplash.Photo, error) {
+	seen := map[string]bool{}
+	recentlyUsed := usedPhotoIDSet(state)
 	chosen := make([]unsplash.Photo, 0, needed)
-	for attempt := 1; len(chosen) < needed && attempt <= 8; attempt++ {
+	fallback := make([]unsplash.Photo, 0, needed)
+
+	for attempt := 1; len(chosen) < needed && attempt <= 10; attempt++ {
 		shortage := needed - len(chosen)
-		requestCount := int(math.Min(30, math.Max(float64(shortage*3), 3)))
+		requestCount := int(math.Min(30, math.Max(float64(shortage*4), 6)))
 		photos, err := a.Client.RandomPhotos(ctx, a.Config.Query, a.Config.ContentFilter, requestCount)
 		if err != nil {
 			return nil, err
@@ -166,11 +215,24 @@ func (a *App) fetchEnoughPhotos(ctx context.Context, needed int) ([]unsplash.Pho
 				a.logf("skip %s (%dx%d smaller than %dx%d)", p.ID, p.Width, p.Height, a.Config.MinWidth, a.Config.MinHeight)
 				continue
 			}
+			if recentlyUsed[p.ID] {
+				a.logf("skip recently used photo %s", p.ID)
+				fallback = append(fallback, p)
+				continue
+			}
 			chosen = append(chosen, p)
 			if len(chosen) == needed {
 				break
 			}
 		}
+	}
+
+	for _, p := range fallback {
+		if len(chosen) == needed {
+			break
+		}
+		a.logf("reusing recent photo %s because not enough new suitable images were returned", p.ID)
+		chosen = append(chosen, p)
 	}
 	if len(chosen) < needed {
 		return nil, fmt.Errorf("unsplash returned only %d suitable images (%dx%d minimum) for %d workspace(s)", len(chosen), a.Config.MinWidth, a.Config.MinHeight, needed)

@@ -7,6 +7,7 @@ A macOS terminal app written in Go that runs as a background LaunchAgent and cha
 - Daily wallpaper change at **02:00** by default.
 - If the Mac is offline at the scheduled time, it waits until network access is available.
 - Downloads only Unsplash photos whose original metadata is at least **3840x2160**.
+- Avoids recently used Unsplash photo IDs as much as possible to reduce repeated wallpapers.
 - Uses a cache directory and removes old wallpaper images after each successful change, keeping only the current applied files required by macOS.
 - Sets a separate image for each macOS Space/workspace detected from Mission Control preferences, with System Events plus Dock wallpaper database support.
 - Manual change shortcut while the service is running. Default: **Shift + Control + Command + D**; configurable with `--hotkey`.
