@@ -38,7 +38,7 @@ func main() {
 	case "install":
 		err = install(os.Args[2:])
 	case "uninstall":
-		err = uninstall()
+		err = uninstall(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -137,12 +137,16 @@ func printConfig() error {
 func install(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	bin := fs.String("bin", "", "path to cecunsplash binary; defaults to current executable")
+	accessKey := fs.String("access-key", "", "Unsplash API access key to store for the background service")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if *accessKey != "" {
+		cfg.UnsplashAccessKey = strings.TrimSpace(*accessKey)
 	}
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -196,7 +200,13 @@ func install(args []string) error {
 	return nil
 }
 
-func uninstall() error {
+func uninstall(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	keepKey := fs.Bool("keep-key", false, "keep Unsplash access key in config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -206,7 +216,29 @@ func uninstall() error {
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	if !*keepKey {
+		if err := deleteAccessKey(); err != nil {
+			return err
+		}
+	}
 	fmt.Println("uninstalled", config.LaunchAgentID)
+	return nil
+}
+
+func deleteAccessKey() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if cfg.UnsplashAccessKey == "" {
+		return nil
+	}
+	cfg.UnsplashAccessKey = ""
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	path, _ := config.Path()
+	fmt.Println("deleted Unsplash access key from", path)
 	return nil
 }
 
@@ -267,8 +299,8 @@ Usage:
   cecunsplash configure --access-key KEY [--query "mountains"] [--time 02:00]
   cecunsplash now
   cecunsplash run
-  cecunsplash install
-  cecunsplash uninstall
+  cecunsplash install --access-key KEY
+  cecunsplash uninstall [--keep-key]
   cecunsplash config
 
 Defaults: 3840x2160 minimum images, daily change at 02:00, and manual

@@ -68,8 +68,10 @@ macOS may ask for Automation permission so the terminal/app can control **System
 ## Install background service
 
 ```sh
-./cecunsplash install
+./cecunsplash install --access-key YOUR_UNSPLASH_ACCESS_KEY
 ```
+
+`install --access-key` stores the key in the config file for the background service. If the key is already configured, `./cecunsplash install` also works.
 
 This installs `~/Library/LaunchAgents/com.ceclinux.cecunsplash.plist`, starts the service immediately, and writes logs to:
 
@@ -82,13 +84,19 @@ Uninstall:
 ./cecunsplash uninstall
 ```
 
+By default, uninstall also deletes the stored Unsplash access key from the config file. To keep it:
+
+```sh
+./cecunsplash uninstall --keep-key
+```
+
 ## Commands
 
 ```text
 cecunsplash configure --access-key KEY [--query "mountains"] [--time 02:00]
 cecunsplash now
 cecunsplash run
-cecunsplash install
-cecunsplash uninstall
+cecunsplash install --access-key KEY
+cecunsplash uninstall [--keep-key]
 cecunsplash config
 ```
