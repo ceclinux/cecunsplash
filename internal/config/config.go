@@ -23,6 +23,7 @@ type Config struct {
 	WallpaperDir      string `json:"wallpaper_dir"`
 	ContentFilter     string `json:"content_filter"`
 	ShortcutEnabled   bool   `json:"shortcut_enabled"`
+	Shortcut          string `json:"shortcut"`
 }
 
 func Default() Config {
@@ -34,6 +35,7 @@ func Default() Config {
 		WallpaperDir:    DefaultWallpaperDir(),
 		ContentFilter:   "high",
 		ShortcutEnabled: true,
+		Shortcut:        "shift+control+command+d",
 	}
 }
 
@@ -104,6 +106,9 @@ func (c *Config) applyDefaults() {
 	if c.ContentFilter == "" {
 		c.ContentFilter = def.ContentFilter
 	}
+	if c.Shortcut == "" {
+		c.Shortcut = def.Shortcut
+	}
 }
 
 func (c *Config) applyEnv() {
@@ -137,6 +142,9 @@ func (c Config) Validate() error {
 	}
 	if _, _, err := ParseChangeTime(c.ChangeTime); err != nil {
 		return err
+	}
+	if c.ShortcutEnabled && strings.TrimSpace(c.Shortcut) == "" {
+		return fmt.Errorf("shortcut cannot be empty when shortcut_enabled is true")
 	}
 	return nil
 }

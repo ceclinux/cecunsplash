@@ -9,7 +9,7 @@ A macOS terminal app written in Go that runs as a background LaunchAgent and cha
 - Downloads only Unsplash photos whose original metadata is at least **3840x2160**.
 - Uses a cache directory and removes old wallpaper images after each successful change, keeping only the current applied files required by macOS.
 - Sets a separate image for each macOS Space/workspace detected from Mission Control preferences, with System Events plus Dock wallpaper database support.
-- Manual change shortcut while the service is running: **Shift + Control + Command + D**.
+- Manual change shortcut while the service is running. Default: **Shift + Control + Command + D**; configurable with `--hotkey`.
 - No third-party Go dependencies.
 
 ## Build
@@ -51,6 +51,7 @@ Optional settings:
   --access-key YOUR_UNSPLASH_ACCESS_KEY \
   --query "mountains ocean" \
   --time 02:00 \
+  --hotkey shift+control+command+d \
   --dir ~/Library/Caches/cecunsplash/wallpapers
 ```
 
@@ -71,7 +72,11 @@ macOS may ask for Automation permission so the terminal/app can control **System
 ./cecunsplash install --access-key YOUR_UNSPLASH_ACCESS_KEY
 ```
 
-`install --access-key` stores the key in the config file for the background service. If the key is already configured, `./cecunsplash install` also works.
+`install --access-key` stores the key in the config file for the background service. If the key is already configured, `./cecunsplash install` also works. You can also set the shortcut during install:
+
+```sh
+./cecunsplash install --access-key YOUR_UNSPLASH_ACCESS_KEY --hotkey option+command+d
+```
 
 This installs `~/Library/LaunchAgents/com.ceclinux.cecunsplash.plist`, starts the service immediately, and writes logs to:
 
@@ -93,10 +98,10 @@ By default, uninstall also deletes the stored Unsplash access key from the confi
 ## Commands
 
 ```text
-cecunsplash configure --access-key KEY [--query "mountains"] [--time 02:00]
+cecunsplash configure --access-key KEY [--query "mountains"] [--time 02:00] [--hotkey shift+control+command+d]
 cecunsplash now
 cecunsplash run
-cecunsplash install --access-key KEY
+cecunsplash install --access-key KEY [--hotkey shift+control+command+d]
 cecunsplash uninstall [--keep-key]
 cecunsplash config
 ```

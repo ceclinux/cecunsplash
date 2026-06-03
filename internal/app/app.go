@@ -186,11 +186,11 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	requests := make(chan string, 2)
 	if a.Config.ShortcutEnabled {
 		hotkeyEvents := make(chan struct{}, 1)
-		if err := hotkey.Register(hotkeyEvents); err != nil {
+		if err := hotkey.Register(hotkeyEvents, a.Config.Shortcut); err != nil {
 			a.logf("hotkey disabled: %v", err)
 		} else {
 			defer hotkey.Stop()
-			a.logf("registered shortcut Shift+Control+Command+D")
+			a.logf("registered shortcut %s", hotkey.Normalize(a.Config.Shortcut))
 			go func() {
 				for {
 					select {

@@ -93,7 +93,8 @@ func configure(args []string) error {
 	query := fs.String("query", "", "Unsplash search query, e.g. 'mountains ocean' ")
 	changeTime := fs.String("time", "", "daily change time in HH:MM, default 02:00")
 	wallpaperDir := fs.String("dir", "", "directory for downloaded wallpapers")
-	shortcut := fs.Bool("shortcut", cfg.ShortcutEnabled, "enable Shift+Control+Command+D")
+	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d")
+	shortcut := fs.Bool("shortcut", cfg.ShortcutEnabled, "enable global shortcut")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -108,6 +109,9 @@ func configure(args []string) error {
 	}
 	if *wallpaperDir != "" {
 		cfg.WallpaperDir = expandHome(*wallpaperDir)
+	}
+	if *hotkeyValue != "" {
+		cfg.Shortcut = strings.TrimSpace(*hotkeyValue)
 	}
 	cfg.ShortcutEnabled = *shortcut
 	if err := cfg.Validate(); err != nil {
@@ -138,6 +142,7 @@ func install(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	bin := fs.String("bin", "", "path to cecunsplash binary; defaults to current executable")
 	accessKey := fs.String("access-key", "", "Unsplash API access key to store for the background service")
+	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -147,6 +152,9 @@ func install(args []string) error {
 	}
 	if *accessKey != "" {
 		cfg.UnsplashAccessKey = strings.TrimSpace(*accessKey)
+	}
+	if *hotkeyValue != "" {
+		cfg.Shortcut = strings.TrimSpace(*hotkeyValue)
 	}
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -296,13 +304,13 @@ func usage() {
 	fmt.Println(`cecunsplash - Unsplash daily workspace wallpapers for macOS
 
 Usage:
-  cecunsplash configure --access-key KEY [--query "mountains"] [--time 02:00]
+  cecunsplash configure --access-key KEY [--query "mountains"] [--time 02:00] [--hotkey shift+control+command+d]
   cecunsplash now
   cecunsplash run
-  cecunsplash install --access-key KEY
+  cecunsplash install --access-key KEY [--hotkey shift+control+command+d]
   cecunsplash uninstall [--keep-key]
   cecunsplash config
 
 Defaults: 3840x2160 minimum images, daily change at 02:00, and manual
-Shift+Control+Command+D while the background service is running.`)
+shift+control+command+d while the background service is running.`)
 }
