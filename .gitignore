@@ -1,0 +1,6 @@
+/cecunsplash
+dist/
+.pi/
+*.log
+*.tmp
+.DS_Store
