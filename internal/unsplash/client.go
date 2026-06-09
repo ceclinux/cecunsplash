@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg"
 	"io"
 	"net/http"
 	"net/url"
@@ -137,6 +139,10 @@ func (c *Client) Download(ctx context.Context, p Photo, dir string, minWidth, mi
 		_ = os.Remove(tmpPath)
 		return "", closeErr
 	}
+	if err := validateImageSize(tmpPath, minWidth, minHeight); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", err
@@ -171,6 +177,22 @@ func (c *Client) authorize(req *http.Request) {
 	req.Header.Set("User-Agent", "cecunsplash/1.0")
 }
 
+func validateImageSize(path string, minWidth, minHeight int) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	cfg, _, err := image.DecodeConfig(file)
+	if err != nil {
+		return fmt.Errorf("read downloaded image size: %w", err)
+	}
+	if cfg.Width < minWidth || cfg.Height < minHeight {
+		return fmt.Errorf("downloaded image is %dx%d, below required minimum %dx%d", cfg.Width, cfg.Height, minWidth, minHeight)
+	}
+	return nil
+}
+
 func sizedURL(raw string, width, height int) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -178,6 +200,7 @@ func sizedURL(raw string, width, height int) (string, error) {
 	}
 	q := u.Query()
 	q.Set("auto", "format")
+	q.Set("fm", "jpg")
 	q.Set("fit", "crop")
 	q.Set("crop", "entropy")
 	q.Set("w", fmt.Sprint(width))

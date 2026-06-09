@@ -212,7 +212,7 @@ func (a *App) fetchEnoughPhotos(ctx context.Context, needed int, state State) ([
 			}
 			seen[p.ID] = true
 			if p.Width < a.Config.MinWidth || p.Height < a.Config.MinHeight {
-				a.logf("skip %s (%dx%d smaller than %dx%d)", p.ID, p.Width, p.Height, a.Config.MinWidth, a.Config.MinHeight)
+				a.logf("skip %s (%dx%d does not meet minimum %dx%d)", p.ID, p.Width, p.Height, a.Config.MinWidth, a.Config.MinHeight)
 				continue
 			}
 			if recentlyUsed[p.ID] {

@@ -311,6 +311,6 @@ Usage:
   cecunsplash uninstall [--keep-key]
   cecunsplash config
 
-Defaults: 3840x2160 minimum images, daily change at 02:00, and manual
-shift+control+command+d while the background service is running.`)
+Defaults: minimum width 3840 and minimum height 2160, daily change at 02:00,
+and manual shift+control+command+d while the background service is running.`)
 }
