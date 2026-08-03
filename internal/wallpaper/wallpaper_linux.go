@@ -29,11 +29,12 @@ import (
 const setterPidName = "setter.pid"
 
 // CountDesktops reports the niri workspace count when running under niri with
-// swww available (per-workspace wallpaper, switched without flash by swww's
-// persistent daemon). Without swww we fall back to one shared wallpaper, since
-// swaybg can only change images by restarting and that flashes on every switch.
+// a persistent wallpaper daemon (swww or its awww fork) available: those can
+// swap images atomically via a persistent daemon, so per-workspace wallpaper is
+// flash-free. Without one we fall back to one shared wallpaper, since swaybg can
+// only change images by restarting and that flashes on every switch.
 func CountDesktops(ctx context.Context) (int, error) {
-	if isNiriDesktop() && hasSwww() {
+	if isNiriDesktop() && hasPersistentDaemon() {
 		workspaces, err := niriWorkspaces(ctx)
 		if err == nil && len(workspaces) > 0 {
 			return len(workspaces), nil
@@ -42,7 +43,10 @@ func CountDesktops(ctx context.Context) (int, error) {
 	return 1, nil
 }
 
-// SetDesktops applies the first wallpaper path using the best available backend.
+// SetDesktops applies wallpapers using the best available backend. On niri with
+// a flash-free persistent daemon and more than one workspace, it gives each
+// workspace its own wallpaper (swapped instantly via the daemon's IPC, no
+// black flash). Otherwise it applies a single shared image.
 func SetDesktops(ctx context.Context, paths []string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("no wallpaper paths provided")
@@ -51,6 +55,15 @@ func SetDesktops(ctx context.Context, paths []string) error {
 		if strings.TrimSpace(p) == "" {
 			return fmt.Errorf("empty wallpaper path in list")
 		}
+	}
+	// Per-workspace wallpaper is only worth doing on niri with a flash-free
+	// persistent daemon (swww/awww); swaybg would flash on every switch, so with
+	// only swaybg we keep a single shared wallpaper instead.
+	if isNiriDesktop() && len(paths) > 1 && hasPersistentDaemon() {
+		if err := applyNiriWorkspaceWallpapers(ctx, paths); err == nil {
+			return nil
+		}
+		// On failure fall back to a single shared image below.
 	}
 	backend, err := detectBackend()
 	if err != nil {
@@ -89,13 +102,15 @@ func detectBackend() (backend, error) {
 	wayland := os.Getenv("WAYLAND_DISPLAY") != ""
 	desktop := strings.ToLower(os.Getenv("XDG_CURRENT_DESKTOP"))
 
-	// Wayland first: swaybg is the de-facto standard for niri, sway, Hyprland, ...
+	// Wayland first: a persistent, IPC-driven daemon (swww / awww) is
+	// preferred on niri because it can swap images without flashing. swaybg,
+	// swww, awww, wbg follow for single-image wallpaper.
 	if wayland {
+		if _, ok := detectPersistentDaemon(); ok {
+			return swwwBackend{}, nil
+		}
 		if _, err := exec.LookPath("swaybg"); err == nil {
 			return swaybgBackend{}, nil
-		}
-		if _, err := exec.LookPath("swww"); err == nil {
-			return swwwBackend{}, nil
 		}
 		if _, err := exec.LookPath("wbg"); err == nil {
 			return wbgBackend{}, nil
@@ -193,14 +208,87 @@ func isGsettingsDesktop(desktop string) bool {
 	return strings.Contains(desktop, "gnome") || strings.Contains(desktop, "unity") || strings.Contains(desktop, "cinnamon")
 }
 
-func hasSwww() bool {
-	_, err := exec.LookPath("swww")
-	return err == nil
-}
-
 func hasSwaybg() bool {
 	_, err := exec.LookPath("swaybg")
 	return err == nil
+}
+
+// persistentDaemon is a flash-free, IPC-driven wallpaper daemon: either swww
+// or its drop-in fork awww. Both keep a long-lived daemon process and swap the
+// displayed image atomically (no kill, no black flash).
+type persistentDaemon struct {
+	client string // "swww" or "awww"
+	daemon string // daemon binary, "" if the client starts it (swww init)
+}
+
+// detectPersistentDaemon returns the first available flash-free daemon.
+func detectPersistentDaemon() (persistentDaemon, bool) {
+	if _, err := exec.LookPath("swww"); err == nil {
+		return persistentDaemon{client: "swww"}, true
+	}
+	if _, err := exec.LookPath("awww"); err == nil {
+		return persistentDaemon{client: "awww", daemon: "awww-daemon"}, true
+	}
+	return persistentDaemon{}, false
+}
+
+func hasPersistentDaemon() bool {
+	_, ok := detectPersistentDaemon()
+	return ok
+}
+
+// ensureDaemon makes sure the daemon is running. `swww init` is idempotent and
+// starts the daemon; awww has no equivalent, so welaunch awww-daemon ourselves
+// (and wait for it to be reachable).
+func (d persistentDaemon) ensureDaemon(ctx context.Context) error {
+	if d.daemonReady(ctx) {
+		return nil
+	}
+	if d.daemon == "" {
+		c, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(c, d.client, "init").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s init: %w: %s", d.client, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	if _, err := exec.LookPath(d.daemon); err != nil {
+		return fmt.Errorf("%s not installed: %w", d.daemon, err)
+	}
+	cmd := exec.Command(d.daemon)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start %s: %w", d.daemon, err)
+	}
+	go func() { _ = cmd.Wait() }() // reap when it exits
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.daemonReady(ctx) {
+			return nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return fmt.Errorf("%s did not become ready", d.daemon)
+}
+
+func (d persistentDaemon) daemonReady(ctx context.Context) bool {
+	c, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return exec.CommandContext(c, d.client, "query").Run() == nil
+}
+
+// paintInstant swaps the wallpaper instantly with no transition animation and
+// no daemon restart, so there is no black flash on workspace switches.
+func (d persistentDaemon) paintInstant(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, d.client, "img", path, "--transition-type", "none").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s img %s: %w: %s", d.client, path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func hasGnomeBackgroundSchema() bool {
@@ -247,12 +335,6 @@ func (swaybgBackend) apply(ctx context.Context, paths []string) error {
 	if _, err := exec.LookPath("swaybg"); err != nil {
 		return fmt.Errorf("swaybg not installed: %w", err)
 	}
-	if isNiriDesktop() && len(paths) > 1 {
-		if err := applyNiriWorkspaceWallpapers(ctx, paths); err == nil {
-			return nil
-		}
-		// If niri workspace introspection fails, fall back to one shared wallpaper.
-	}
 	return startSwaybg(paths[0])
 }
 
@@ -288,14 +370,16 @@ type swwwBackend struct{}
 
 func (swwwBackend) apply(ctx context.Context, paths []string) error {
 	path := paths[0]
-	if _, err := exec.LookPath("swww"); err != nil {
-		return fmt.Errorf("swww not installed: %w", err)
+	d, ok := detectPersistentDaemon()
+	if !ok {
+		return fmt.Errorf("no persistent wallpaper daemon (swww/awww) found")
 	}
-	// Ensure the daemon is running (no-op if already running).
-	_ = exec.Command("swww", "init").Run()
-	out, err := exec.Command("swww", "img", path, "--transition-type", "grow").CombinedOutput()
+	if err := d.ensureDaemon(ctx); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
+	}
+	out, err := exec.CommandContext(ctx, d.client, "img", path, "--transition-type", "grow").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("swww img failed: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s img failed: %w: %s", d.client, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -614,8 +698,8 @@ func focusedWorkspaceID(workspaces []niriWorkspace) int {
 // applyNiriWorkspaceWallpapers maps one wallpaper per niri workspace (by stable
 // id) and starts a watcher that swaps the displayed wallpaper as the focused
 // workspace changes. The currently focused workspace is painted immediately.
-// It prefers swww (persistent daemon, instant `--transition-type none` swap: no
-// black flash) and falls back to swaybg.
+// It prefers a persistent IPC daemon (swww/awww, instant `--transition-type
+// none` swap: no black flash) and falls back to swaybg.
 func applyNiriWorkspaceWallpapers(ctx context.Context, paths []string) error {
 	paint, err := chooseNiriPainter(ctx)
 	if err != nil {
@@ -631,49 +715,27 @@ func applyNiriWorkspaceWallpapers(ctx context.Context, paths []string) error {
 	return paint(img)
 }
 
-// chooseNiriPainter returns a flash-free painter when possible. swww is
-// preferred: it keeps a persistent daemon and swaps the image buffer atomically
-// via `swww img --transition-type none`, so switching workspaces shows the new
-// wallpaper instantly with no kill/black flash. swaybg can only change images by
-// restarting, which flashes, so it is only used as a last resort.
+// chooseNiriPainter returns a flash-free painter when possible. A persistent
+// IPC daemon (swww or its awww fork) swaps the image atomically via
+// `<client> img --transition-type none` (instant, no daemon restart), so
+// switching workspaces shows the new wallpaper instantly with no black flash.
+// swaybg can only change images by restarting, which flashes, so it is only
+// used as a last resort.
 func chooseNiriPainter(ctx context.Context) (imagePainter, error) {
-	if hasSwww() {
-		if err := swwwEnsureDaemon(ctx); err != nil {
-			return nil, fmt.Errorf("start swww daemon: %w", err)
+	if d, ok := detectPersistentDaemon(); ok {
+		if err := d.ensureDaemon(ctx); err != nil {
+			return nil, fmt.Errorf("start daemon: %w", err)
 		}
-		// Kill any swaybg cecunsplash previously managed so it does not fight swww.
+		// Kill any swaybg cecunsplash previously managed so it does not fight the
+		// persistent daemon.
 		_ = killManagedSetter(false)
-		return swwwPaintInstant, nil
+		return d.paintInstant, nil
 	}
 	if hasSwaybg() {
 		fmt.Fprintln(os.Stderr, "cecunsplash: hint: install 'swww' for per-workspace wallpaper without a flash on switch (swaybg must restart to change images)")
 		return startSwaybg, nil
 	}
 	return nil, fmt.Errorf("no Wayland wallpaper backend found; install 'swww' (recommended) for niri")
-}
-
-// swwwEnsureDaemon starts the swww daemon if it is not already running. `swww
-// init` is idempotent: it exits 0 with "daemon already running" when active.
-func swwwEnsureDaemon(ctx context.Context) error {
-	c, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(c, "swww", "init").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("swww init: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// swwwPaintInstant swaps the wallpaper instantly with no transition animation
-// and no daemon restart, so there is no black flash on workspace switches.
-func swwwPaintInstant(path string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "swww", "img", path, "--transition-type", "none").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("swww img %s: %w: %s", path, err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // ---------- pidfile management for managed setters ----------
