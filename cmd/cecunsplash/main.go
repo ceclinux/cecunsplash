@@ -96,7 +96,7 @@ func configure(args []string) error {
 	query := fs.String("query", "", "Unsplash search query, e.g. 'mountains ocean' ")
 	changeTime := fs.String("time", "", "daily change time in HH:MM, default 02:00")
 	wallpaperDir := fs.String("dir", "", "directory for downloaded wallpapers")
-	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d (macOS) or signal+SIGUSR1 (Linux)")
+	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d (macOS) or ctrl+alt+d (Linux)")
 	shortcut := fs.Bool("shortcut", cfg.ShortcutEnabled, "enable the manual trigger")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -145,7 +145,7 @@ func install(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	bin := fs.String("bin", "", "path to cecunsplash binary; defaults to current executable")
 	accessKey := fs.String("access-key", "", "Unsplash API access key to store for the background service")
-	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d (macOS) or signal+SIGUSR1 (Linux)")
+	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d (macOS) or ctrl+alt+d (Linux)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -268,7 +268,7 @@ Usage:
 
 Defaults: minimum width 3840 and minimum height 2160, daily change at 02:00.
 macOS manual shortcut: shift+control+command+d.
-Linux manual shortcut: signal+SIGUSR1, invoked via ` + "`cecunsplash trigger`" + `.
+Linux manual shortcut: ctrl+alt+d; bind it to run ` + "`cecunsplash trigger`" + `.
 On Linux/Wayland (niri, sway, Hyprland) the wallpaper is set with swaybg;
 GNOME uses gsettings; X11 uses feh/xwallpaper/nitrogen.`)
 }

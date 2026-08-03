@@ -2,8 +2,7 @@
 
 package config
 
-// DefaultShortcut on Linux is a signal-based manual trigger (SIGUSR1 to the
-// running daemon, via `cecunsplash trigger`), because Wayland compositors do
-// not expose portable global key grabs. On GNOME/Mutter/X11 the same trigger
-// works too.
-const DefaultShortcut = "signal+SIGUSR1"
+// DefaultShortcut is the suggested Linux keybinding for manually changing the
+// wallpaper. cecunsplash still receives the trigger via SIGUSR1, so bind this
+// shortcut in your desktop environment/compositor to run `cecunsplash trigger`.
+const DefaultShortcut = "ctrl+alt+d"
