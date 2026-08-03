@@ -3,6 +3,7 @@
 package wallpaper
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -140,6 +141,33 @@ type niriWorkspace struct {
 	Name      string `json:"name"`
 	IsFocused bool   `json:"is_focused"`
 }
+
+// niriEventType identifies a kind of event in the niri event-stream.
+// Only the events cecunsplash cares about are modelled here.
+type niriEventType string
+
+const (
+	evWorkspacesChanged  niriEventType = "WorkspacesChanged"
+	evWorkspaceActivated niriEventType = "WorkspaceActivated"
+)
+
+// niriEvent is a thin decoder for the niri event-stream JSON. Unknown event
+// types are simply ignored.
+type niriEvent struct {
+	WorkspacesChanged *struct {
+		Workspaces []niriWorkspace `json:"workspaces"`
+	} `json:"WorkspacesChanged,omitempty"`
+
+	WorkspaceActivated *struct {
+		ID      int  `json:"id"`
+		Focused bool `json:"focused"`
+	} `json:"WorkspaceActivated,omitempty"`
+}
+
+// stdbufArgs makes `niri msg --json event-stream` line-buffered so individual
+// events are delivered immediately instead of being held in a 4 KiB block
+// buffer until it fills. stdbuf (coreutils) is present on every Linux distro.
+var stdbufArgs = []string{"stdbuf", "-oL"}
 
 func isNiriDesktop() bool {
 	return strings.Contains(strings.ToLower(os.Getenv("XDG_CURRENT_DESKTOP")), "niri") || os.Getenv("NIRI_SOCKET") != ""
@@ -362,136 +390,202 @@ func (nitrogenBackend) apply(ctx context.Context, paths []string) error {
 
 // ---------- niri per-workspace wallpapers ----------
 
-// niriWatcher holds the state for the background goroutine that swaps swaybg
-// when the focused niri workspace changes, giving each workspace its own
-// wallpaper.
+// niriWatcher maps each niri workspace id to a wallpaper image and swaps swaybg
+// whenever the focused workspace changes. It is driven by niri's JSON
+// event-stream (line-buffered via stdbuf), so updates are event-driven rather than
+// polled. Workspace ids are stable across reordering, so each workspace keeps
+// its wallpaper even when moved.
 type niriWatcher struct {
-	mu       sync.Mutex
-	idxToImg map[int]string // workspace idx -> image path
-	stopCh   chan struct{}
-	cancel   context.CancelFunc
-	started  bool
+	mu      sync.Mutex
+	idToImg map[int]string // workspace id -> image path (stable across reorders)
+	imgs    []string       // available images, cycled onto new workspaces
+	next    int            // round-robin cursor for assigning images to new ids
+	stopCh  chan struct{}
+	cancel  context.CancelFunc
 }
 
 var niriWatch niriWatcher
 
-// start launches the watcher goroutine (idempotent). It returns the image
-// path for the currently focused workspace so the caller can paint it right
-// away.
+// start (re)initialises the id->image map from the current workspace list and
+// launches the event-stream watcher. It returns the image for the currently
+// focused workspace so the caller can paint it immediately.
 func (w *niriWatcher) start(ctx context.Context, paths []string) (string, error) {
-	w.mu.Lock()
-	if w.stopCh != nil {
-		close(w.stopCh)
-	}
-	if w.cancel != nil {
-		w.cancel()
-	}
-	watchCtx, cancel := context.WithCancel(context.Background())
-	w.stopCh = make(chan struct{})
-	w.cancel = cancel
-	w.idxToImg = buildIdxToImg(paths)
-	stopCh := w.stopCh
-	w.started = true
-	w.mu.Unlock()
-
 	workspaces, err := niriWorkspaces(ctx)
 	if err != nil {
-		cancel()
 		return "", err
 	}
-	focusedIdx := focusedWorkspaceIdx(workspaces)
-	img := w.imgForIdx(focusedIdx)
+
+	// Stop any previous watcher before starting a fresh one.
+	w.stop()
+
+	watchCtx, cancel := context.WithCancel(context.Background())
+	// Assign images in workspace-index order so position N gets image N, while
+	// keying by the stable workspace id so reordering keeps each wallpaper in place.
+	sorted := append([]niriWorkspace(nil), workspaces...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Idx < sorted[j].Idx })
+	idToImg := make(map[int]string, len(sorted))
+	for i, ws := range sorted {
+		idToImg[ws.ID] = paths[i%len(paths)]
+	}
+
+	w.mu.Lock()
+	w.idToImg = idToImg
+	w.imgs = paths
+	w.next = 0
+	w.stopCh = make(chan struct{})
+	w.cancel = cancel
+	stopCh := w.stopCh
+	w.mu.Unlock()
+
+	focusedID := focusedWorkspaceID(workspaces)
+	img := w.imgForID(focusedID)
 
 	go w.watchLoop(watchCtx, stopCh)
 	return img, nil
 }
 
+// stop tears down the watcher: cancels the event-stream context and closes the
+// stop channel so the goroutine exits. Safe to call multiple times.
 func (w *niriWatcher) stop() {
 	w.mu.Lock()
-	if w.stopCh != nil {
-		close(w.stopCh)
-		w.stopCh = nil
-	}
-	if w.cancel != nil {
-		w.cancel()
-		w.cancel = nil
-	}
-	w.started = false
+	stopCh := w.stopCh
+	cancel := w.cancel
+	w.stopCh = nil
+	w.cancel = nil
 	w.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if stopCh != nil {
+		<-stopCh // wait for the goroutine to finish
+	}
 }
 
-func (w *niriWatcher) imgForIdx(idx int) string {
+// imgForID returns the image mapped to a workspace id, assigning one (round
+// robin) if the workspace is new.
+func (w *niriWatcher) imgForID(id int) string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if idx, ok := w.idxToImg[idx]; ok {
-		return idx
+	if img, ok := w.idToImg[id]; ok {
+		return img
 	}
-	// unknown / new workspace: cycle through the available images
-	if len(w.idxToImg) == 0 {
+	if len(w.imgs) == 0 {
 		return ""
 	}
-	keys := make([]int, 0, len(w.idxToImg))
-	for k := range w.idxToImg {
-		keys = append(keys, k)
-	}
-	sort.Ints(keys)
-	return w.idxToImg[keys[idx%len(keys)]]
+	img := w.imgs[w.next%len(w.imgs)]
+	w.next++
+	w.idToImg[id] = img
+	return img
 }
 
-// watchLoop polls niri for the focused workspace and restarts swaybg with the
-// appropriate image when it changes. Polling is used instead of `event-stream`
-// because the latter is block-buffered when its stdout is a pipe, so individual
-// events may not be delivered until the buffer fills.
+// watchLoop runs `niri msg --json event-stream` (line-buffered) and reacts to
+// workspace focus changes. On EOF or error it reconnects after a short backoff.
 func (w *niriWatcher) watchLoop(ctx context.Context, stopCh chan struct{}) {
-	var lastIdx int = -1
+	defer func() {
+		select {
+		case <-stopCh:
+		default:
+			close(stopCh)
+		}
+	}()
 	for {
 		select {
 		case <-stopCh:
 			return
 		case <-ctx.Done():
 			return
-		case <-time.After(750 * time.Millisecond):
+		default:
 		}
-
-		workspaces, err := niriWorkspaces(ctx)
-		if err != nil {
-			continue
+		if err := w.streamEvents(ctx, stopCh); err != nil {
+			fmt.Fprintf(os.Stderr, "cecunsplash: niri event-stream ended: %v\n", err)
 		}
-		idx := focusedWorkspaceIdx(workspaces)
-		if idx == lastIdx {
-			continue
-		}
-		lastIdx = idx
-		if img := w.imgForIdx(idx); img != "" {
-			if err := startSwaybg(img); err != nil {
-				fmt.Fprintf(os.Stderr, "cecunsplash: startSwaybg on focus ws %d: %v\n", idx, err)
-			}
+		select {
+		case <-stopCh:
+			return
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
 		}
 	}
 }
 
-func buildIdxToImg(paths []string) map[int]string {
-	m := make(map[int]string, len(paths))
-	for i, p := range paths {
-		m[i+1] = p // niri workspace idx is 1-based
+func (w *niriWatcher) streamEvents(ctx context.Context, stopCh <-chan struct{}) error {
+	args := append(append([]string{}, stdbufArgs...), "niri", "msg", "--json", "event-stream")
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
 	}
-	return m
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start niri event-stream: %w", err)
+	}
+	// Ensure the child is reaped, even if it exits before us.
+	go func() { _, _ = cmd.Process.Wait() }()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1<<20), 1<<24)
+	for scanner.Scan() {
+		select {
+		case <-stopCh:
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			return scanner.Err()
+		case <-ctx.Done():
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			return scanner.Err()
+		default:
+		}
+		var ev niriEvent
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		switch {
+		case ev.WorkspaceActivated != nil && ev.WorkspaceActivated.Focused:
+			w.onFocus(ev.WorkspaceActivated.ID)
+		case ev.WorkspacesChanged != nil:
+			w.onWorkspacesChanged(ev.WorkspacesChanged.Workspaces)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	return nil
 }
 
-func focusedWorkspaceIdx(workspaces []niriWorkspace) int {
+// onFocus swaps swaybg to the image mapped to the newly focused workspace.
+func (w *niriWatcher) onFocus(id int) {
+	img := w.imgForID(id)
+	if img == "" {
+		return
+	}
+	if err := startSwaybg(img); err != nil {
+		fmt.Fprintf(os.Stderr, "cecunsplash: startSwaybg on focus (ws id %d): %v\n", id, err)
+	}
+}
+
+// onWorkspacesChanged learns about newly created workspaces so they get an
+// image assigned before they are first focused.
+func (w *niriWatcher) onWorkspacesChanged(workspaces []niriWorkspace) {
+	for _, ws := range workspaces {
+		_ = w.imgForID(ws.ID) // assign round-robin if new
+	}
+}
+
+func focusedWorkspaceID(workspaces []niriWorkspace) int {
 	for _, ws := range workspaces {
 		if ws.IsFocused {
-			return ws.Idx
+			return ws.ID
 		}
 	}
 	if len(workspaces) > 0 {
-		return workspaces[0].Idx
+		return workspaces[0].ID
 	}
-	return 1
+	return 0
 }
 
-// applyNiriWorkspaceWallpapers maps one wallpaper per niri workspace index and
-// starts a watcher that swaps swaybg as the focused workspace changes. The
+// applyNiriWorkspaceWallpapers maps one wallpaper per niri workspace (by stable
+// id) and starts a watcher that swaps swaybg as the focused workspace changes.
+// The currently focused workspace is painted immediately.
 // currently focused workspace is painted immediately.
 func applyNiriWorkspaceWallpapers(ctx context.Context, paths []string) error {
 	img, err := niriWatch.start(ctx, paths)
