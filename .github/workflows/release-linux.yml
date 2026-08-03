@@ -48,7 +48,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-          architecture: ${{ matrix.goarch == 'arm64' && 'arm64' || 'x64' }}
 
       - name: Build binary
         env:
