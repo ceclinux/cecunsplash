@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package wallpaper
 
@@ -8,9 +8,9 @@ import (
 )
 
 func CountDesktops(ctx context.Context) (int, error) {
-	return 0, fmt.Errorf("desktop wallpaper control is only supported on macOS")
+	return 0, fmt.Errorf("desktop wallpaper control is only supported on macOS and Linux")
 }
 
 func SetDesktops(ctx context.Context, paths []string) error {
-	return fmt.Errorf("desktop wallpaper control is only supported on macOS")
+	return fmt.Errorf("desktop wallpaper control is only supported on macOS and Linux")
 }

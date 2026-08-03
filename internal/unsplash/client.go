@@ -20,6 +20,7 @@ const apiBase = "https://api.unsplash.com"
 type Client struct {
 	AccessKey string
 	HTTP      *http.Client
+	baseURL   string
 }
 
 type Photo struct {
@@ -53,8 +54,13 @@ func New(accessKey string) *Client {
 		HTTP: &http.Client{
 			Timeout: 45 * time.Second,
 		},
+		baseURL: apiBase,
 	}
 }
+
+// SetBaseURL overrides the Unsplash API base URL. It is exported for tests
+// (and advanced users) that need to point the client at a different server.
+func (c *Client) SetBaseURL(u string) { c.baseURL = u }
 
 func (c *Client) RandomPhotos(ctx context.Context, query, contentFilter string, count int) ([]Photo, error) {
 	if count < 1 {
@@ -63,7 +69,7 @@ func (c *Client) RandomPhotos(ctx context.Context, query, contentFilter string, 
 	if count > 30 {
 		count = 30
 	}
-	u, _ := url.Parse(apiBase + "/photos/random")
+	u, _ := url.Parse(c.baseURL + "/photos/random")
 	q := u.Query()
 	q.Set("orientation", "landscape")
 	q.Set("content_filter", defaultString(contentFilter, "high"))

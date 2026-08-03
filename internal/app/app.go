@@ -14,6 +14,7 @@ import (
 
 	"github.com/ceclinux/cecunsplash/internal/config"
 	"github.com/ceclinux/cecunsplash/internal/hotkey"
+	"github.com/ceclinux/cecunsplash/internal/service"
 	"github.com/ceclinux/cecunsplash/internal/unsplash"
 	"github.com/ceclinux/cecunsplash/internal/wallpaper"
 )
@@ -25,6 +26,11 @@ type App struct {
 
 	mu      sync.Mutex
 	running bool
+
+	// WaitForNetworkFn overrides the network-wait function used by ChangeAll.
+	// When nil, the package-level WaitForNetwork is used. Tests set this to a
+	// no-op so the fake server is the only thing contacted.
+	WaitForNetworkFn func(context.Context, *log.Logger) error
 }
 
 func New(cfg config.Config, logger *log.Logger) *App {
@@ -34,6 +40,10 @@ func New(cfg config.Config, logger *log.Logger) *App {
 		Logger: logger,
 	}
 }
+
+// SetClient replaces the Unsplash client. It is exported for tests and for
+// embedded integrations that need to point the client at a custom base URL.
+func (a *App) SetClient(c *unsplash.Client) { a.Client = c }
 
 func (a *App) ChangeAll(ctx context.Context) error {
 	a.mu.Lock()
@@ -242,6 +252,13 @@ func (a *App) fetchEnoughPhotos(ctx context.Context, needed int, state State) ([
 
 func (a *App) RunDaemon(ctx context.Context) error {
 	if err := a.Config.Validate(); err != nil {
+		if config.IsMissingAccessKey(err) {
+			// Install the service plumbing first, add a key later. Returning nil here
+			// keeps systemd from crash-looping; the user restarts after configuring.
+			a.logf("not starting scheduler: %v", err)
+			a.logf("add an Unsplash access key then run: systemctl --user restart %s", service.UnitName())
+			return nil
+		}
 		return err
 	}
 
@@ -376,6 +393,14 @@ func WaitForNetwork(ctx context.Context, logger *log.Logger) error {
 }
 
 const apiBaseHealthURL = "https://api.unsplash.com/"
+
+// networkReady calls the configured network-wait function or the default.
+func (a *App) networkReady(ctx context.Context) error {
+	if a.WaitForNetworkFn != nil {
+		return a.WaitForNetworkFn(ctx, a.Logger)
+	}
+	return WaitForNetwork(ctx, a.Logger)
+}
 
 func (a *App) logf(format string, args ...any) {
 	if a.Logger != nil {

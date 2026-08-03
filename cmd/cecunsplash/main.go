@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -15,6 +14,8 @@ import (
 
 	"github.com/ceclinux/cecunsplash/internal/app"
 	"github.com/ceclinux/cecunsplash/internal/config"
+	"github.com/ceclinux/cecunsplash/internal/hotkey"
+	"github.com/ceclinux/cecunsplash/internal/service"
 )
 
 func main() {
@@ -39,6 +40,8 @@ func main() {
 		err = install(os.Args[2:])
 	case "uninstall":
 		err = uninstall(os.Args[2:])
+	case "trigger":
+		err = trigger()
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -52,7 +55,7 @@ func main() {
 
 func runDaemon(logger *log.Logger, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	noShortcut := fs.Bool("no-shortcut", false, "disable Shift+Control+Command+D for this run")
+	noShortcut := fs.Bool("no-shortcut", false, "disable the manual trigger shortcut for this run")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -93,8 +96,8 @@ func configure(args []string) error {
 	query := fs.String("query", "", "Unsplash search query, e.g. 'mountains ocean' ")
 	changeTime := fs.String("time", "", "daily change time in HH:MM, default 02:00")
 	wallpaperDir := fs.String("dir", "", "directory for downloaded wallpapers")
-	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d")
-	shortcut := fs.Bool("shortcut", cfg.ShortcutEnabled, "enable global shortcut")
+	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d (macOS) or signal+SIGUSR1 (Linux)")
+	shortcut := fs.Bool("shortcut", cfg.ShortcutEnabled, "enable the manual trigger")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -142,7 +145,7 @@ func install(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	bin := fs.String("bin", "", "path to cecunsplash binary; defaults to current executable")
 	accessKey := fs.String("access-key", "", "Unsplash API access key to store for the background service")
-	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d")
+	hotkeyValue := fs.String("hotkey", "", "global shortcut, e.g. shift+control+command+d (macOS) or signal+SIGUSR1 (Linux)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -157,9 +160,14 @@ func install(args []string) error {
 		cfg.Shortcut = strings.TrimSpace(*hotkeyValue)
 	}
 	if err := cfg.Validate(); err != nil {
-		return err
+		if config.IsMissingAccessKey(err) {
+			fmt.Fprintln(os.Stderr, "warning: no Unsplash access key configured; install the unit now and add one later with: cecunsplash configure --access-key YOUR_KEY")
+			fmt.Fprintln(os.Stderr, "         then restart the service:        systemctl --user restart "+service.UnitName())
+		} else {
+			return err
+		}
 	}
-	// Persist the access key as launchd does not inherit the shell environment.
+	// Persist the access key as background services do not inherit the shell env.
 	if err := config.Save(cfg); err != nil {
 		return err
 	}
@@ -177,35 +185,7 @@ func install(args []string) error {
 	if _, err := os.Stat(exe); err != nil {
 		return err
 	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	logDir := filepath.Join(home, "Library", "Logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return err
-	}
-	plistPath := filepath.Join(home, "Library", "LaunchAgents", config.LaunchAgentID+".plist")
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
-		return err
-	}
-	plist := launchAgentPlist(exe, filepath.Join(logDir, "cecunsplash.log"), filepath.Join(logDir, "cecunsplash.err.log"))
-	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
-		return err
-	}
-	_ = runCommand("launchctl", "bootout", "gui/"+fmt.Sprint(os.Getuid()), plistPath)
-	if err := runCommand("launchctl", "bootstrap", "gui/"+fmt.Sprint(os.Getuid()), plistPath); err != nil {
-		return err
-	}
-	if err := runCommand("launchctl", "enable", "gui/"+fmt.Sprint(os.Getuid())+"/"+config.LaunchAgentID); err != nil {
-		return err
-	}
-	if err := runCommand("launchctl", "kickstart", "-k", "gui/"+fmt.Sprint(os.Getuid())+"/"+config.LaunchAgentID); err != nil {
-		return err
-	}
-	fmt.Println("installed LaunchAgent", plistPath)
-	return nil
+	return service.Install(exe)
 }
 
 func uninstall(args []string) error {
@@ -214,22 +194,34 @@ func uninstall(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	plistPath := filepath.Join(home, "Library", "LaunchAgents", config.LaunchAgentID+".plist")
-	_ = runCommand("launchctl", "bootout", "gui/"+fmt.Sprint(os.Getuid()), plistPath)
-	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-		return err
+	if err := service.Uninstall(); err != nil {
+		// report but continue so the key can still be cleared
+		fmt.Fprintln(os.Stderr, "warning:", err)
 	}
 	if !*keepKey {
 		if err := deleteAccessKey(); err != nil {
 			return err
 		}
 	}
-	fmt.Println("uninstalled", config.LaunchAgentID)
+	return nil
+}
+
+// trigger sends SIGUSR1 to the running daemon (if any) to perform an immediate
+// wallpaper change. On Linux this is the manual "shortcut"; on platforms without
+// the signal-based hotkey it reports an error.
+func trigger() error {
+	pid, err := hotkey.ReadDaemonPID()
+	if err != nil {
+		return fmt.Errorf("no running cecunsplash daemon found: %w", err)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := proc.Signal(syscall.SIGUSR1); err != nil {
+		return fmt.Errorf("send trigger to daemon (pid %d): %w", pid, err)
+	}
+	fmt.Printf("sent manual trigger to daemon (pid %d)\n", pid)
 	return nil
 }
 
@@ -250,39 +242,6 @@ func deleteAccessKey() error {
 	return nil
 }
 
-func launchAgentPlist(exe, stdoutPath, stderrPath string) string {
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>%s</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>%s</string>
-    <string>run</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>%s</string>
-  <key>StandardErrorPath</key>
-  <string>%s</string>
-</dict>
-</plist>
-`, config.LaunchAgentID, xmlEscape(exe), xmlEscape(stdoutPath), xmlEscape(stderrPath))
-}
-
-func runCommand(name string, args ...string) error {
-	out, err := exec.Command(name, args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 func expandHome(path string) string {
 	if path == "~" {
 		home, _ := os.UserHomeDir()
@@ -295,22 +254,21 @@ func expandHome(path string) string {
 	return path
 }
 
-func xmlEscape(s string) string {
-	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;", "'", "&apos;")
-	return replacer.Replace(s)
-}
-
 func usage() {
-	fmt.Println(`cecunsplash - Unsplash daily workspace wallpapers for macOS
+	fmt.Println(`cecunsplash - daily Unsplash wallpapers (macOS and Linux)
 
 Usage:
-  cecunsplash configure --access-key KEY [--query "mountains"] [--time 02:00] [--hotkey shift+control+command+d]
+  cecunsplash configure --access-key KEY [--query "mountains"] [--time 02:00] [--hotkey ...]
   cecunsplash now
   cecunsplash run
-  cecunsplash install --access-key KEY [--hotkey shift+control+command+d]
+  cecunsplash install [--access-key KEY] [--hotkey ...]
   cecunsplash uninstall [--keep-key]
+  cecunsplash trigger     (Linux manual shortcut: sends SIGUSR1 to the daemon)
   cecunsplash config
 
-Defaults: minimum width 3840 and minimum height 2160, daily change at 02:00,
-and manual shift+control+command+d while the background service is running.`)
+Defaults: minimum width 3840 and minimum height 2160, daily change at 02:00.
+macOS manual shortcut: shift+control+command+d.
+Linux manual shortcut: signal+SIGUSR1, invoked via ` + "`cecunsplash trigger`" + `.
+On Linux/Wayland (niri, sway, Hyprland) the wallpaper is set with swaybg;
+GNOME uses gsettings; X11 uses feh/xwallpaper/nitrogen.`)
 }

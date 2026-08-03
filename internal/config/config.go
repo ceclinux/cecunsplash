@@ -35,7 +35,7 @@ func Default() Config {
 		WallpaperDir:    DefaultWallpaperDir(),
 		ContentFilter:   "high",
 		ShortcutEnabled: true,
-		Shortcut:        "shift+control+command+d",
+		Shortcut:        DefaultShortcut,
 	}
 }
 
@@ -133,9 +133,11 @@ func Save(cfg Config) error {
 	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
+var errMissingAccessKey = fmt.Errorf("missing Unsplash access key; set UNSPLASH_ACCESS_KEY or run `%s configure --access-key YOUR_KEY`", AppName)
+
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.UnsplashAccessKey) == "" {
-		return fmt.Errorf("missing Unsplash access key; set UNSPLASH_ACCESS_KEY or run `%s configure --access-key YOUR_KEY`", AppName)
+		return errMissingAccessKey
 	}
 	if c.MinWidth < 3840 || c.MinHeight < 2160 {
 		return fmt.Errorf("minimum size must be at least 3840x2160")
@@ -155,4 +157,11 @@ func ParseChangeTime(s string) (hour, minute int, err error) {
 		return 0, 0, fmt.Errorf("invalid change_time %q, expected HH:MM", s)
 	}
 	return hour, minute, nil
+}
+
+// IsMissingAccessKey reports whether err is the "access key not configured"
+// validation error. Used by install/run to install the service plumbing before a
+// key is present, and to let the daemon fail gracefully until a key is added.
+func IsMissingAccessKey(err error) bool {
+	return err != nil && err == errMissingAccessKey
 }
