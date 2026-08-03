@@ -35,6 +35,8 @@ func tempPathEnv(t *testing.T) string {
 }
 
 func TestCountDesktopsIsOneOnLinux(t *testing.T) {
+	t.Setenv("XDG_CURRENT_DESKTOP", "")
+	t.Setenv("NIRI_SOCKET", "")
 	n, err := CountDesktops(context.Background())
 	if err != nil {
 		t.Fatalf("CountDesktops: %v", err)
@@ -157,7 +159,8 @@ func TestDetectBackendErrorsWhenNothingAvailable(t *testing.T) {
 }
 
 func TestDetectBackendDoesNotUseGsettingsOnNiri(t *testing.T) {
-	dir := tempPathEnv(t)
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
 	t.Setenv("WAYLAND_DISPLAY", "wayland-test")
 	t.Setenv("DISPLAY", ":99")
 	t.Setenv("XDG_CURRENT_DESKTOP", "niri")

@@ -17,7 +17,7 @@ A **macOS and Linux** terminal app written in Go that runs as a background servi
 - Uses a cache directory and removes old wallpaper images after each successful change, keeping only the currently applied files.
 - Manual change while the service is running:
   - **macOS:** global hotkey, default **Shift + Control + Command + D** (configurable with `--hotkey`).
-  - **Linux:** default manual shortcut **Ctrl + Alt + D**; bind it in your desktop environment/compositor to run `cecunsplash trigger` (Wayland compositors do not expose portable global key grabs).
+  - **Linux:** default manual shortcut **Ctrl + Alt + D**; bind it in your desktop environment/compositor to run `cecunsplash trigger` (Wayland compositors do not expose portable global key grabs). On **niri**, each workspace gets its own wallpaper.
 - No third-party Go dependencies.
 
 ## Build

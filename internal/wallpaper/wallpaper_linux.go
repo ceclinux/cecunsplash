@@ -4,28 +4,38 @@ package wallpaper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
-// On most Linux compositors / window managers every workspace (Space) shares the
-// same wallpaper, so cecunsplash applies a single image. swaybg can paint a
-// different image per output, but per-workspace wallpaper is not generally
-// supported by Wayland compositors, so we keep the macOS behaviour of one image
-// per desktop but collapse it to a single shared wallpaper here.
+// On Linux a distinct wallpaper can be applied per niri workspace: cecunsplash
+// queries niri for the workspace count, downloads one image per workspace, and
+// runs a background watcher that swaps swaybg whenever the focused workspace
+// changes. On other compositors / window managers every workspace shares one
+// wallpaper, so we collapse to a single shared image there.
 
 const setterPidName = "setter.pid"
 
-// CountDesktops reports 1: Linux desktops share one wallpaper across workspaces.
+// CountDesktops reports the niri workspace count when running under niri;
+// otherwise Linux desktops share one wallpaper across workspaces.
 func CountDesktops(ctx context.Context) (int, error) {
+	if isNiriDesktop() {
+		workspaces, err := niriWorkspaces(ctx)
+		if err == nil && len(workspaces) > 0 {
+			return len(workspaces), nil
+		}
+	}
 	return 1, nil
 }
 
@@ -124,6 +134,31 @@ func boolStr(b bool) string {
 	return "unset"
 }
 
+type niriWorkspace struct {
+	ID        int    `json:"id"`
+	Idx       int    `json:"idx"`
+	Name      string `json:"name"`
+	IsFocused bool   `json:"is_focused"`
+}
+
+func isNiriDesktop() bool {
+	return strings.Contains(strings.ToLower(os.Getenv("XDG_CURRENT_DESKTOP")), "niri") || os.Getenv("NIRI_SOCKET") != ""
+}
+
+func niriWorkspaces(ctx context.Context) ([]niriWorkspace, error) {
+	c, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(c, "niri", "msg", "--json", "workspaces").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("niri workspaces: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	var workspaces []niriWorkspace
+	if err := json.Unmarshal(out, &workspaces); err != nil {
+		return nil, err
+	}
+	return workspaces, nil
+}
+
 func isGsettingsDesktop(desktop string) bool {
 	return strings.Contains(desktop, "gnome") || strings.Contains(desktop, "unity") || strings.Contains(desktop, "cinnamon")
 }
@@ -169,11 +204,19 @@ func fileURI(p string) (string, error) {
 type swaybgBackend struct{}
 
 func (swaybgBackend) apply(ctx context.Context, paths []string) error {
-	path := paths[0]
 	if _, err := exec.LookPath("swaybg"); err != nil {
 		return fmt.Errorf("swaybg not installed: %w", err)
 	}
+	if isNiriDesktop() && len(paths) > 1 {
+		if err := applyNiriWorkspaceWallpapers(ctx, paths); err == nil {
+			return nil
+		}
+		// If niri workspace introspection fails, fall back to one shared wallpaper.
+	}
+	return startSwaybg(paths[0])
+}
 
+func startSwaybg(path string) error {
 	// Kill any previously managed swaybg so we can start a fresh one.
 	if err := killManagedSetter(false); err != nil {
 		// non-fatal: races with the desktop can happen
@@ -190,7 +233,9 @@ func (swaybgBackend) apply(ctx context.Context, paths []string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start swaybg: %w", err)
 	}
+	go func() { _ = cmd.Wait() }() // reap the detached setter when it exits
 	if err := writeSetterPid(cmd.Process.Pid, "swaybg", strings.Join(args, " ")); err != nil {
+
 		// Logically we still want swaybg running; record failure but keep going.
 		_ = err
 	}
@@ -233,6 +278,7 @@ func (wbgBackend) apply(ctx context.Context, paths []string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start wbg: %w", err)
 	}
+	go func() { _ = cmd.Wait() }() // reap the detached setter when it exits
 	_ = writeSetterPid(cmd.Process.Pid, "wbg", "-i "+path)
 	return nil
 }
@@ -314,6 +360,150 @@ func (nitrogenBackend) apply(ctx context.Context, paths []string) error {
 	return nil
 }
 
+// ---------- niri per-workspace wallpapers ----------
+
+// niriWatcher holds the state for the background goroutine that swaps swaybg
+// when the focused niri workspace changes, giving each workspace its own
+// wallpaper.
+type niriWatcher struct {
+	mu       sync.Mutex
+	idxToImg map[int]string // workspace idx -> image path
+	stopCh   chan struct{}
+	cancel   context.CancelFunc
+	started  bool
+}
+
+var niriWatch niriWatcher
+
+// start launches the watcher goroutine (idempotent). It returns the image
+// path for the currently focused workspace so the caller can paint it right
+// away.
+func (w *niriWatcher) start(ctx context.Context, paths []string) (string, error) {
+	w.mu.Lock()
+	if w.stopCh != nil {
+		close(w.stopCh)
+	}
+	if w.cancel != nil {
+		w.cancel()
+	}
+	watchCtx, cancel := context.WithCancel(context.Background())
+	w.stopCh = make(chan struct{})
+	w.cancel = cancel
+	w.idxToImg = buildIdxToImg(paths)
+	stopCh := w.stopCh
+	w.started = true
+	w.mu.Unlock()
+
+	workspaces, err := niriWorkspaces(ctx)
+	if err != nil {
+		cancel()
+		return "", err
+	}
+	focusedIdx := focusedWorkspaceIdx(workspaces)
+	img := w.imgForIdx(focusedIdx)
+
+	go w.watchLoop(watchCtx, stopCh)
+	return img, nil
+}
+
+func (w *niriWatcher) stop() {
+	w.mu.Lock()
+	if w.stopCh != nil {
+		close(w.stopCh)
+		w.stopCh = nil
+	}
+	if w.cancel != nil {
+		w.cancel()
+		w.cancel = nil
+	}
+	w.started = false
+	w.mu.Unlock()
+}
+
+func (w *niriWatcher) imgForIdx(idx int) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if idx, ok := w.idxToImg[idx]; ok {
+		return idx
+	}
+	// unknown / new workspace: cycle through the available images
+	if len(w.idxToImg) == 0 {
+		return ""
+	}
+	keys := make([]int, 0, len(w.idxToImg))
+	for k := range w.idxToImg {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	return w.idxToImg[keys[idx%len(keys)]]
+}
+
+// watchLoop polls niri for the focused workspace and restarts swaybg with the
+// appropriate image when it changes. Polling is used instead of `event-stream`
+// because the latter is block-buffered when its stdout is a pipe, so individual
+// events may not be delivered until the buffer fills.
+func (w *niriWatcher) watchLoop(ctx context.Context, stopCh chan struct{}) {
+	var lastIdx int = -1
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ctx.Done():
+			return
+		case <-time.After(750 * time.Millisecond):
+		}
+
+		workspaces, err := niriWorkspaces(ctx)
+		if err != nil {
+			continue
+		}
+		idx := focusedWorkspaceIdx(workspaces)
+		if idx == lastIdx {
+			continue
+		}
+		lastIdx = idx
+		if img := w.imgForIdx(idx); img != "" {
+			if err := startSwaybg(img); err != nil {
+				fmt.Fprintf(os.Stderr, "cecunsplash: startSwaybg on focus ws %d: %v\n", idx, err)
+			}
+		}
+	}
+}
+
+func buildIdxToImg(paths []string) map[int]string {
+	m := make(map[int]string, len(paths))
+	for i, p := range paths {
+		m[i+1] = p // niri workspace idx is 1-based
+	}
+	return m
+}
+
+func focusedWorkspaceIdx(workspaces []niriWorkspace) int {
+	for _, ws := range workspaces {
+		if ws.IsFocused {
+			return ws.Idx
+		}
+	}
+	if len(workspaces) > 0 {
+		return workspaces[0].Idx
+	}
+	return 1
+}
+
+// applyNiriWorkspaceWallpapers maps one wallpaper per niri workspace index and
+// starts a watcher that swaps swaybg as the focused workspace changes. The
+// currently focused workspace is painted immediately.
+func applyNiriWorkspaceWallpapers(ctx context.Context, paths []string) error {
+	img, err := niriWatch.start(ctx, paths)
+	if err != nil {
+		return err
+	}
+	if img == "" {
+		return fmt.Errorf("no wallpaper mapped for focused workspace")
+	}
+	return startSwaybg(img)
+}
+
 // ---------- pidfile management for managed setters ----------
 
 // writeSetterPid records the PID/command line of a setter process started by us.
@@ -377,6 +567,7 @@ func sendTerm(pid int) {
 
 // CleanupSetter stops a setter previously started by cecunsplash (kept for future use).
 func CleanupSetter() {
+	niriWatch.stop()
 	_ = killManagedSetter(false)
 }
 
