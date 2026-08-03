@@ -34,6 +34,7 @@ GitHub Actions workflows are included in `.github/workflows/`:
 
 - `release.yml` — builds and publishes **macOS** binaries (`cecunsplash-darwin-amd64`, `cecunsplash-darwin-arm64`).
 - `release-linux.yml` — builds and publishes **Linux** binaries (`cecunsplash-linux-amd64`, `cecunsplash-linux-arm64`).
+- `release-archlinux.yml` — builds and publishes an **Arch Linux pacman package** (`cecunsplash-<version>-1-x86_64.pkg.tar.zst`).
 
 Create a release by pushing a version tag:
 
@@ -43,6 +44,17 @@ git push origin v0.1.0
 ```
 
 The Linux workflow also runs `go test -race ./...` on Ubuntu before building.
+
+### Arch Linux package
+
+Each tagged GitHub release includes a pacman package for Arch Linux x86_64 users:
+
+```sh
+curl -LO https://github.com/ceclinux/cecunsplash/releases/download/v0.1.0/cecunsplash-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ./cecunsplash-0.1.0-1-x86_64.pkg.tar.zst
+```
+
+Replace `v0.1.0`/`0.1.0` with the release version you want to install.
 
 ## Configure
 

@@ -1,0 +1,118 @@
+name: Release Arch Linux package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build pacman package
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+
+    steps:
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed base-devel git go sudo
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build package
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$TAG_NAME" == v* ]]; then
+            PKGVER="${TAG_NAME#v}"
+            SOURCE_REF="#tag=$TAG_NAME"
+          else
+            PKGVER="0.0.0"
+            SOURCE_REF="#commit=$GITHUB_SHA"
+          fi
+
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+          mkdir -p /tmp/cecunsplash-arch
+          cat > /tmp/cecunsplash-arch/PKGBUILD <<EOF
+          pkgname=cecunsplash
+          pkgver=$PKGVER
+          pkgrel=1
+          pkgdesc='Unsplash wallpaper changer daemon for macOS and Linux'
+          arch=('x86_64')
+          url='https://github.com/ceclinux/cecunsplash'
+          license=('unknown')
+          depends=('glibc')
+          makedepends=('go' 'git')
+          optdepends=(
+            'swaybg: Wayland wallpaper backend (recommended)'
+            'swww: Wayland wallpaper backend'
+            'wbg: Wayland wallpaper backend'
+            'feh: X11 wallpaper backend'
+            'xwallpaper: X11 wallpaper backend'
+            'nitrogen: X11 wallpaper backend'
+          )
+          source=("cecunsplash::git+file://$GITHUB_WORKSPACE$SOURCE_REF")
+          sha256sums=('SKIP')
+
+          build() {
+            cd "\$srcdir/cecunsplash"
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o cecunsplash ./cmd/cecunsplash
+          }
+
+          check() {
+            cd "\$srcdir/cecunsplash"
+            go test ./...
+          }
+
+          package() {
+            cd "\$srcdir/cecunsplash"
+            install -Dm755 cecunsplash "\$pkgdir/usr/bin/cecunsplash"
+            install -Dm644 README.md "\$pkgdir/usr/share/doc/cecunsplash/README.md"
+          }
+          EOF
+
+          chown -R builder:builder /tmp/cecunsplash-arch
+          sudo -u builder bash -lc 'cd /tmp/cecunsplash-arch && makepkg --noconfirm --syncdeps --cleanbuild'
+
+          mkdir -p dist
+          cp /tmp/cecunsplash-arch/*.pkg.tar.zst dist/
+          sha256sum dist/*.pkg.tar.zst > dist/SHA256SUMS-archlinux.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cecunsplash-archlinux-x86_64
+          path: |
+            dist/*.pkg.tar.zst
+            dist/SHA256SUMS-archlinux.txt
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release asset
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.pkg.tar.zst
+            dist/SHA256SUMS-archlinux.txt
+          generate_release_notes: true
