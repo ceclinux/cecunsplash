@@ -87,9 +87,10 @@ func TestSwaybgBackendAppliesAndRecordsPid(t *testing.T) {
 
 func TestGsettingsBackendAppliesURI(t *testing.T) {
 	dir := tempPathEnv(t)
-	// Force GNOME backend by unsetting wayland env so detection skips Wayland.
+	// Force GNOME backend by unsetting wayland env and setting a GNOME desktop.
 	t.Setenv("WAYLAND_DISPLAY", "")
 	t.Setenv("DISPLAY", ":99")
+	t.Setenv("XDG_CURRENT_DESKTOP", "GNOME")
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
 
 	marker := filepath.Join(t.TempDir(), "gs-args.txt")
@@ -151,6 +152,31 @@ func TestDetectBackendErrorsWhenNothingAvailable(t *testing.T) {
 		t.Fatal("expected detectBackend to fail with no tools available")
 	}
 	if !strings.Contains(err.Error(), "wallpaper backend") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDetectBackendDoesNotUseGsettingsOnNiri(t *testing.T) {
+	dir := tempPathEnv(t)
+	t.Setenv("WAYLAND_DISPLAY", "wayland-test")
+	t.Setenv("DISPLAY", ":99")
+	t.Setenv("XDG_CURRENT_DESKTOP", "niri")
+
+	marker := filepath.Join(t.TempDir(), "gs-args.txt")
+	path := filepath.Join(dir, "gsettings")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"list-schemas\" ]; then echo \"org.gnome.desktop.background\"; exit 0; fi\n" +
+		"printf '%s\\n' \"$@\" >> \"" + marker + "\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := detectBackend()
+	if err == nil {
+		t.Fatal("expected detectBackend to fail without a real Wayland backend")
+	}
+	if !strings.Contains(err.Error(), "Install 'swaybg' for niri/Wayland") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

@@ -89,8 +89,11 @@ func detectBackend() (backend, error) {
 		}
 	}
 
-	// GNOME / Unity / Cinnamon expose the background via gsettings.
-	if hasGnomeBackgroundSchema() {
+	// GNOME / Unity / Cinnamon expose the background via gsettings. Do not use
+	// this fallback on other Wayland compositors (niri/sway/Hyprland/etc.); the
+	// schema may exist because GNOME components are installed, but changing it has
+	// no visible effect there.
+	if isGsettingsDesktop(desktop) && hasGnomeBackgroundSchema() {
 		return gsettingsBackend{}, nil
 	}
 
@@ -119,6 +122,10 @@ func boolStr(b bool) string {
 		return "set"
 	}
 	return "unset"
+}
+
+func isGsettingsDesktop(desktop string) bool {
+	return strings.Contains(desktop, "gnome") || strings.Contains(desktop, "unity") || strings.Contains(desktop, "cinnamon")
 }
 
 func hasGnomeBackgroundSchema() bool {
