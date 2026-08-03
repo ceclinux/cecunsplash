@@ -28,10 +28,12 @@ import (
 
 const setterPidName = "setter.pid"
 
-// CountDesktops reports the niri workspace count when running under niri;
-// otherwise Linux desktops share one wallpaper across workspaces.
+// CountDesktops reports the niri workspace count when running under niri with
+// swww available (per-workspace wallpaper, switched without flash by swww's
+// persistent daemon). Without swww we fall back to one shared wallpaper, since
+// swaybg can only change images by restarting and that flashes on every switch.
 func CountDesktops(ctx context.Context) (int, error) {
-	if isNiriDesktop() {
+	if isNiriDesktop() && hasSwww() {
 		workspaces, err := niriWorkspaces(ctx)
 		if err == nil && len(workspaces) > 0 {
 			return len(workspaces), nil
@@ -189,6 +191,16 @@ func niriWorkspaces(ctx context.Context) ([]niriWorkspace, error) {
 
 func isGsettingsDesktop(desktop string) bool {
 	return strings.Contains(desktop, "gnome") || strings.Contains(desktop, "unity") || strings.Contains(desktop, "cinnamon")
+}
+
+func hasSwww() bool {
+	_, err := exec.LookPath("swww")
+	return err == nil
+}
+
+func hasSwaybg() bool {
+	_, err := exec.LookPath("swaybg")
+	return err == nil
 }
 
 func hasGnomeBackgroundSchema() bool {
@@ -390,13 +402,21 @@ func (nitrogenBackend) apply(ctx context.Context, paths []string) error {
 
 // ---------- niri per-workspace wallpapers ----------
 
-// niriWatcher maps each niri workspace id to a wallpaper image and swaps swaybg
-// whenever the focused workspace changes. It is driven by niri's JSON
-// event-stream (line-buffered via stdbuf), so updates are event-driven rather than
-// polled. Workspace ids are stable across reordering, so each workspace keeps
-// its wallpaper even when moved.
+// imagePainter paints a single wallpaper image onto the output. The niri
+// per-workspace watcher holds one of these and calls it whenever the focused
+// workspace changes.
+type imagePainter func(path string) error
+
+// niriWatcher maps each niri workspace id to a wallpaper image and swaps the
+// displayed wallpaper whenever the focused workspace changes. It is driven by
+// niri's JSON event-stream (line-buffered via stdbuf), so updates are
+// event-driven rather than polled. Workspace ids are stable across reordering,
+// so each workspace keeps its wallpaper even when moved. The painter is swww
+// with `--transition-type none` when available (instant atomic swap via the
+// persistent swww daemon: no kill, no black flash), falling back to swaybg.
 type niriWatcher struct {
 	mu      sync.Mutex
+	paint   imagePainter
 	idToImg map[int]string // workspace id -> image path (stable across reorders)
 	imgs    []string       // available images, cycled onto new workspaces
 	next    int            // round-robin cursor for assigning images to new ids
@@ -407,9 +427,10 @@ type niriWatcher struct {
 var niriWatch niriWatcher
 
 // start (re)initialises the id->image map from the current workspace list and
-// launches the event-stream watcher. It returns the image for the currently
-// focused workspace so the caller can paint it immediately.
-func (w *niriWatcher) start(ctx context.Context, paths []string) (string, error) {
+// launches the event-stream watcher using the given painter. It returns the
+// image for the currently focused workspace so the caller can paint it
+// immediately.
+func (w *niriWatcher) start(ctx context.Context, paths []string, paint imagePainter) (string, error) {
 	workspaces, err := niriWorkspaces(ctx)
 	if err != nil {
 		return "", err
@@ -429,6 +450,7 @@ func (w *niriWatcher) start(ctx context.Context, paths []string) (string, error)
 	}
 
 	w.mu.Lock()
+	w.paint = paint
 	w.idToImg = idToImg
 	w.imgs = paths
 	w.next = 0
@@ -552,14 +574,20 @@ func (w *niriWatcher) streamEvents(ctx context.Context, stopCh <-chan struct{}) 
 	return nil
 }
 
-// onFocus swaps swaybg to the image mapped to the newly focused workspace.
+// onFocus paints the image mapped to the newly focused workspace.
 func (w *niriWatcher) onFocus(id int) {
 	img := w.imgForID(id)
 	if img == "" {
 		return
 	}
-	if err := startSwaybg(img); err != nil {
-		fmt.Fprintf(os.Stderr, "cecunsplash: startSwaybg on focus (ws id %d): %v\n", id, err)
+	w.mu.Lock()
+	paint := w.paint
+	w.mu.Unlock()
+	if paint == nil {
+		return
+	}
+	if err := paint(img); err != nil {
+		fmt.Fprintf(os.Stderr, "cecunsplash: paint on focus (ws id %d): %v\n", id, err)
 	}
 }
 
@@ -584,18 +612,68 @@ func focusedWorkspaceID(workspaces []niriWorkspace) int {
 }
 
 // applyNiriWorkspaceWallpapers maps one wallpaper per niri workspace (by stable
-// id) and starts a watcher that swaps swaybg as the focused workspace changes.
-// The currently focused workspace is painted immediately.
-// currently focused workspace is painted immediately.
+// id) and starts a watcher that swaps the displayed wallpaper as the focused
+// workspace changes. The currently focused workspace is painted immediately.
+// It prefers swww (persistent daemon, instant `--transition-type none` swap: no
+// black flash) and falls back to swaybg.
 func applyNiriWorkspaceWallpapers(ctx context.Context, paths []string) error {
-	img, err := niriWatch.start(ctx, paths)
+	paint, err := chooseNiriPainter(ctx)
+	if err != nil {
+		return err
+	}
+	img, err := niriWatch.start(ctx, paths, paint)
 	if err != nil {
 		return err
 	}
 	if img == "" {
 		return fmt.Errorf("no wallpaper mapped for focused workspace")
 	}
-	return startSwaybg(img)
+	return paint(img)
+}
+
+// chooseNiriPainter returns a flash-free painter when possible. swww is
+// preferred: it keeps a persistent daemon and swaps the image buffer atomically
+// via `swww img --transition-type none`, so switching workspaces shows the new
+// wallpaper instantly with no kill/black flash. swaybg can only change images by
+// restarting, which flashes, so it is only used as a last resort.
+func chooseNiriPainter(ctx context.Context) (imagePainter, error) {
+	if hasSwww() {
+		if err := swwwEnsureDaemon(ctx); err != nil {
+			return nil, fmt.Errorf("start swww daemon: %w", err)
+		}
+		// Kill any swaybg cecunsplash previously managed so it does not fight swww.
+		_ = killManagedSetter(false)
+		return swwwPaintInstant, nil
+	}
+	if hasSwaybg() {
+		fmt.Fprintln(os.Stderr, "cecunsplash: hint: install 'swww' for per-workspace wallpaper without a flash on switch (swaybg must restart to change images)")
+		return startSwaybg, nil
+	}
+	return nil, fmt.Errorf("no Wayland wallpaper backend found; install 'swww' (recommended) for niri")
+}
+
+// swwwEnsureDaemon starts the swww daemon if it is not already running. `swww
+// init` is idempotent: it exits 0 with "daemon already running" when active.
+func swwwEnsureDaemon(ctx context.Context) error {
+	c, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(c, "swww", "init").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("swww init: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// swwwPaintInstant swaps the wallpaper instantly with no transition animation
+// and no daemon restart, so there is no black flash on workspace switches.
+func swwwPaintInstant(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "swww", "img", path, "--transition-type", "none").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("swww img %s: %w: %s", path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // ---------- pidfile management for managed setters ----------

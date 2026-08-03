@@ -121,6 +121,27 @@ the **user journal**:
 journalctl --user -u com.ceclinux.cecunsplash.service -f
 ```
 
+### niri: per-workspace wallpaper (no flash)
+
+On niri, each workspace can have its own wallpaper. Flash-free switching
+requires `swww`, whose persistent daemon swaps the image atomically via
+`swww img --transition-type none` (instant, no process restart):
+
+```sh
+sudo pacman -S swww
+```
+
+`swaybg` cannot do this without a flash (it has no IPC, so changing the image
+requires killing and restarting the process). With only `swaybg` installed,
+cecunsplash falls back to one shared wallpaper across all workspaces (no flash).
+
+After installing `swww`, trigger a change and each workspace will keep its own
+wallpaper, shown instantly with no black flash on switch:
+
+```sh
+cecunsplash trigger
+```
+
 ### macOS (LaunchAgent)
 
 ```sh
