@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -491,28 +490,30 @@ func (nitrogenBackend) apply(ctx context.Context, paths []string) error {
 // workspace changes.
 type imagePainter func(path string) error
 
-// niriWatcher maps each niri workspace id to a wallpaper image and swaps the
+// niriWatcher gives each niri workspace its own wallpaper and swaps the
 // displayed wallpaper whenever the focused workspace changes. It is driven by
 // niri's JSON event-stream (line-buffered via stdbuf), so updates are
-// event-driven rather than polled. Workspace ids are stable across reordering,
-// so each workspace keeps its wallpaper even when moved. The painter is swww
-// with `--transition-type none` when available (instant atomic swap via the
-// persistent swww daemon: no kill, no black flash), falling back to swaybg.
+// event-driven rather than polled. The image for a workspace is chosen by its
+// position (idx): workspace at index N gets paths[(N-1)%len(paths)]. The
+// mapping is cached by niri's stable workspace id, so a workspace keeps its
+// wallpaper even if it is later reordered. The painter is a persistent IPC
+// daemon (swww/awww) with `--transition-type none` when available (instant
+// atomic swap via the persistent daemon: no kill, no black flash), falling back
+// to swaybg.
 type niriWatcher struct {
-	mu      sync.Mutex
-	paint   imagePainter
-	idToImg map[int]string // workspace id -> image path (stable across reorders)
-	imgs    []string       // available images, cycled onto new workspaces
-	next    int            // round-robin cursor for assigning images to new ids
-	stopCh  chan struct{}
-	cancel  context.CancelFunc
+	mu       sync.Mutex
+	paint    imagePainter
+	idxToImg map[int]string // workspace idx -> image path (by position)
+	idToImg  map[int]string // workspace id -> image path (cached, stable)
+	stopCh   chan struct{}
+	cancel   context.CancelFunc
 }
 
 var niriWatch niriWatcher
 
-// start (re)initialises the id->image map from the current workspace list and
-// launches the event-stream watcher using the given painter. It returns the
-// image for the currently focused workspace so the caller can paint it
+// start (re)initialises the position->image map from the current workspace
+// list and launches the event-stream watcher using the given painter. It returns
+// the image for the currently focused workspace so the caller can paint it
 // immediately.
 func (w *niriWatcher) start(ctx context.Context, paths []string, paint imagePainter) (string, error) {
 	workspaces, err := niriWorkspaces(ctx)
@@ -524,20 +525,22 @@ func (w *niriWatcher) start(ctx context.Context, paths []string, paint imagePain
 	w.stop()
 
 	watchCtx, cancel := context.WithCancel(context.Background())
-	// Assign images in workspace-index order so position N gets image N, while
-	// keying by the stable workspace id so reordering keeps each wallpaper in place.
-	sorted := append([]niriWorkspace(nil), workspaces...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Idx < sorted[j].Idx })
-	idToImg := make(map[int]string, len(sorted))
-	for i, ws := range sorted {
-		idToImg[ws.ID] = paths[i%len(paths)]
+	// Build the position->image map: workspace at index N gets image
+	// paths[(N-1)%len(paths)]. Then cache id->image for the workspaces that
+	// currently exist so the first paint is correct.
+	idxToImg := make(map[int]string, len(paths))
+	for i := range paths {
+		idxToImg[i+1] = paths[i%len(paths)] // niri workspace idx is 1-based
+	}
+	idToImg := make(map[int]string, len(workspaces))
+	for _, ws := range workspaces {
+		idToImg[ws.ID] = w.imgForIdxLocked(ws.Idx, idxToImg)
 	}
 
 	w.mu.Lock()
 	w.paint = paint
+	w.idxToImg = idxToImg
 	w.idToImg = idToImg
-	w.imgs = paths
-	w.next = 0
 	w.stopCh = make(chan struct{})
 	w.cancel = cancel
 	stopCh := w.stopCh
@@ -567,20 +570,48 @@ func (w *niriWatcher) stop() {
 	}
 }
 
-// imgForID returns the image mapped to a workspace id, assigning one (round
-// robin) if the workspace is new.
-func (w *niriWatcher) imgForID(id int) string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if img, ok := w.idToImg[id]; ok {
+// imgForIdxLocked returns the image for a workspace position (idx). The caller
+// must hold w.mu.
+func (w *niriWatcher) imgForIdxLocked(idx int, idxToImg map[int]string) string {
+	if img, ok := idxToImg[idx]; ok {
 		return img
 	}
-	if len(w.imgs) == 0 {
+	// idx beyond the image list: cycle by position for a stable result.
+	if len(idxToImg) == 0 {
 		return ""
 	}
-	img := w.imgs[w.next%len(w.imgs)]
-	w.next++
-	w.idToImg[id] = img
+	return idxToImg[((idx-1)%len(idxToImg))+1]
+}
+
+// imgForID returns the cached image for a workspace id, assigning one (by the
+// workspace's current position) if the workspace is new. New workspaces get the
+// image for their idx, so the mapping stays deterministic.
+func (w *niriWatcher) imgForID(id int) string {
+	w.mu.Lock()
+	if img, ok := w.idToImg[id]; ok {
+		w.mu.Unlock()
+		return img
+	}
+	idxToImg := w.idxToImg
+	w.mu.Unlock()
+
+	// Unknown workspace: look up the daemon's workspace idx for this id and use
+	// the image for that position. The niri query runs outside the lock.
+	idx := 1
+	if workspaces, err := niriWorkspaces(context.Background()); err == nil {
+		for _, ws := range workspaces {
+			if ws.ID == id {
+				idx = ws.Idx
+				break
+			}
+		}
+	}
+	img := w.imgForIdxLocked(idx, idxToImg)
+	if img != "" {
+		w.mu.Lock()
+		w.idToImg[id] = img
+		w.mu.Unlock()
+	}
 	return img
 }
 
@@ -676,10 +707,10 @@ func (w *niriWatcher) onFocus(id int) {
 }
 
 // onWorkspacesChanged learns about newly created workspaces so they get an
-// image assigned before they are first focused.
+// image assigned (by their position) before they are first focused.
 func (w *niriWatcher) onWorkspacesChanged(workspaces []niriWorkspace) {
 	for _, ws := range workspaces {
-		_ = w.imgForID(ws.ID) // assign round-robin if new
+		_ = w.imgForID(ws.ID) // assign by idx if new
 	}
 }
 
