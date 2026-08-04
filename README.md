@@ -17,7 +17,7 @@ A **macOS and Linux** terminal app written in Go that runs as a background servi
 - Uses a cache directory and removes old wallpaper images after each successful change, keeping only the currently applied files.
 - Manual change while the service is running:
   - **macOS:** global hotkey, default **Shift + Control + Command + D** (configurable with `--hotkey`).
-  - **Linux:** default manual shortcut **Ctrl + Alt + D**; bind it in your desktop environment/compositor to run `cecunsplash trigger` (Wayland compositors do not expose portable global key grabs). On **niri**, each workspace gets its own wallpaper.
+  - **Linux:** default manual shortcut **Ctrl + Alt + D**; bind it in your desktop environment/compositor to run `cecunsplash trigger` (Wayland compositors do not expose portable global key grabs).
 - No third-party Go dependencies.
 
 ## Build
@@ -119,27 +119,6 @@ the **user journal**:
 
 ```sh
 journalctl --user -u com.ceclinux.cecunsplash.service -f
-```
-
-### niri: per-workspace wallpaper (no flash)
-
-On niri, each workspace can have its own wallpaper. Flash-free switching
-requires `swww`, whose persistent daemon swaps the image atomically via
-`swww img --transition-type none` (instant, no process restart):
-
-```sh
-sudo pacman -S swww
-```
-
-`swaybg` cannot do this without a flash (it has no IPC, so changing the image
-requires killing and restarting the process). With only `swaybg` installed,
-cecunsplash falls back to one shared wallpaper across all workspaces (no flash).
-
-After installing `swww`, trigger a change and each workspace will keep its own
-wallpaper, shown instantly with no black flash on switch:
-
-```sh
-cecunsplash trigger
 ```
 
 ### macOS (LaunchAgent)

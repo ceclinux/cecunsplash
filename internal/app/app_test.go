@@ -107,11 +107,9 @@ func TestChangeAllEndToEndWithFakeServer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wallpaperBinDir, "swaybg"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", wallpaperBinDir)
+	t.Setenv("PATH", wallpaperBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("WAYLAND_DISPLAY", "wayland-test")
 	t.Setenv("DISPLAY", "")
-	t.Setenv("XDG_CURRENT_DESKTOP", "")
-	t.Setenv("NIRI_SOCKET", "")
 
 	cfg := config.Default()
 	cfg.UnsplashAccessKey = "test-key"
@@ -191,8 +189,6 @@ func TestChangeAllRejectsUnsuitablePhotos(t *testing.T) {
 	t.Setenv("UNSPLASH_ACCESS_KEY", "")
 	t.Setenv("WAYLAND_DISPLAY", "")
 	t.Setenv("DISPLAY", "")
-	t.Setenv("XDG_CURRENT_DESKTOP", "")
-	t.Setenv("NIRI_SOCKET", "")
 
 	cfg := config.Default()
 	cfg.UnsplashAccessKey = "test-key"

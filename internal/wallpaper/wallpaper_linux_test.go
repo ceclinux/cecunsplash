@@ -34,19 +34,7 @@ func tempPathEnv(t *testing.T) string {
 	return dir
 }
 
-// isolatedPathEnv returns a temp dir that is the ONLY directory in PATH, so the
-// test fully controls which tools detectBackend/apply can find (it cannot
-// accidentally pick up real swww/awww/swaybg installed on the host).
-func isolatedPathEnv(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("PATH", dir)
-	return dir
-}
-
 func TestCountDesktopsIsOneOnLinux(t *testing.T) {
-	t.Setenv("XDG_CURRENT_DESKTOP", "")
-	t.Setenv("NIRI_SOCKET", "")
 	n, err := CountDesktops(context.Background())
 	if err != nil {
 		t.Fatalf("CountDesktops: %v", err)
@@ -57,7 +45,7 @@ func TestCountDesktopsIsOneOnLinux(t *testing.T) {
 }
 
 func TestSwaybgBackendAppliesAndRecordsPid(t *testing.T) {
-	dir := isolatedPathEnv(t)
+	dir := tempPathEnv(t)
 	t.Setenv("WAYLAND_DISPLAY", "wayland-test")
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
 
@@ -169,8 +157,7 @@ func TestDetectBackendErrorsWhenNothingAvailable(t *testing.T) {
 }
 
 func TestDetectBackendDoesNotUseGsettingsOnNiri(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("PATH", dir)
+	dir := tempPathEnv(t)
 	t.Setenv("WAYLAND_DISPLAY", "wayland-test")
 	t.Setenv("DISPLAY", ":99")
 	t.Setenv("XDG_CURRENT_DESKTOP", "niri")
