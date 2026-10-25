@@ -14,7 +14,6 @@ import (
 
 	"github.com/ceclinux/cecunsplash/internal/app"
 	"github.com/ceclinux/cecunsplash/internal/config"
-	"github.com/ceclinux/cecunsplash/internal/hotkey"
 	"github.com/ceclinux/cecunsplash/internal/service"
 )
 
@@ -203,25 +202,6 @@ func uninstall(args []string) error {
 			return err
 		}
 	}
-	return nil
-}
-
-// trigger sends SIGUSR1 to the running daemon (if any) to perform an immediate
-// wallpaper change. On Linux this is the manual "shortcut"; on platforms without
-// the signal-based hotkey it reports an error.
-func trigger() error {
-	pid, err := hotkey.ReadDaemonPID()
-	if err != nil {
-		return fmt.Errorf("no running cecunsplash daemon found: %w", err)
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	if err := proc.Signal(syscall.SIGUSR1); err != nil {
-		return fmt.Errorf("send trigger to daemon (pid %d): %w", pid, err)
-	}
-	fmt.Printf("sent manual trigger to daemon (pid %d)\n", pid)
 	return nil
 }
 

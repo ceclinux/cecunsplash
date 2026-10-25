@@ -20,7 +20,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # The go.mod minimum is 1.22, but Go < 1.24 does not emit the LC_UUID
+          # load command that macOS 26's dyld requires. Use a current toolchain
+          # for macOS builds and tests.
+          go-version: stable
           cache: true
 
       - name: Test
@@ -46,7 +49,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # The go.mod minimum is 1.22, but Go < 1.24 does not emit the LC_UUID
+          # load command that macOS 26's dyld requires. Use a current toolchain
+          # for macOS builds and tests.
+          go-version: stable
           cache: true
 
       - name: Build binary
