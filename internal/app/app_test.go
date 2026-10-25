@@ -175,6 +175,25 @@ func TestChangeAllEndToEndWithFakeServer(t *testing.T) {
 	}
 }
 
+func TestFailureBackoff(t *testing.T) {
+	a := New(config.Config{}, log.New(io.Discard, "", 0))
+
+	if wait := a.failureRetryIn(time.Minute); wait != 0 {
+		t.Errorf("failureRetryIn before any failure = %v, want 0", wait)
+	}
+
+	a.markFailure()
+	wait := a.failureRetryIn(time.Minute)
+	if wait <= 0 || wait > time.Minute {
+		t.Errorf("failureRetryIn after failure = %v, want (0, 1m]", wait)
+	}
+
+	a.clearFailure()
+	if wait := a.failureRetryIn(time.Minute); wait != 0 {
+		t.Errorf("failureRetryIn after clearFailure = %v, want 0", wait)
+	}
+}
+
 func TestChangeAllRejectsUnsuitablePhotos(t *testing.T) {
 	img := jpegBytes(t, 3840, 2160)
 	// Every served photo is smaller than the configured minimum.

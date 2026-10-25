@@ -3,8 +3,9 @@
 A **macOS and Linux** terminal app written in Go that runs as a background service and changes your wallpaper from [Unsplash](https://unsplash.com).
 
 - On **macOS** it runs as a LaunchAgent and sets a separate image for each Space/workspace.
-- On **Linux** it runs as a **systemd user service** and set the wallpaper using the best available backend for your desktop:
-  - **Wayland** (niri, sway, Hyprland, …) → [`swaybg`](https://github.com/swaywm/swaybg) (preferred), also `swww` and `wbg`.
+- On **Linux** it runs as a **systemd user service** and sets the wallpaper using the best available backend for your desktop:
+  - **Noctalia shell** → `noctalia msg wallpaper-set`, with **one image per connected monitor** on niri. The shell IPC socket and `NIRI_SOCKET` are derived from `$XDG_RUNTIME_DIR`, so the service works without the graphical session environment.
+  - **Other Wayland** (niri, sway, Hyprland, …) → [`swaybg`](https://github.com/swaywm/swaybg) (preferred), also `swww` and `wbg`.
   - **GNOME/Unity/Cinnamon** → `gsettings` (`org.gnome.desktop.background`).
   - **X11** → `feh`, `xwallpaper`, or `nitrogen`.
 
@@ -173,6 +174,7 @@ cecunsplash config
 
 The backend is auto-detected from the environment in this priority order:
 
+0. A running **Noctalia** shell answers `noctalia msg wallpaper-get` → `noctalia msg wallpaper-set`. On niri, one image is downloaded per enabled output (connectors are sorted) and applied with `wallpaper-set <connector> <path>`; the first image is also set as the default for outputs connected later. This avoids a second background surface competing with Noctalia's layer.
 1. `WAYLAND_DISPLAY` is set:
    - `swaybg` (managed, restarted per change with `-m fill -i <image>`)
    - `swww` (`swww init` then `swww img`)
@@ -182,10 +184,12 @@ The backend is auto-detected from the environment in this priority order:
 
 If none is available the command fails with a message listing what to install.
 
-> On Wayland compositors such as **niri**, install `swaybg` for wallpaper changes
-> to take effect (e.g. `pacman -S swaybg` on Arch, `apt install swaybg` on Debian).
-> The daemon manages its own `swaybg` process via a pidfile under
-> `~/.local/state/cecunsplash/` (or `$XDG_STATE_HOME/cecunsplash/`).
+> If you run the **Noctalia** shell it owns the background layer, so no extra
+> wallpaper daemon is needed. Otherwise, on Wayland compositors such as **niri**,
+> install `swaybg` for wallpaper changes to take effect (e.g. `pacman -S swaybg`
+> on Arch, `apt install swaybg` on Debian). The daemon manages its own `swaybg`
+> process via a pidfile under `~/.local/state/cecunsplash/`
+> (or `$XDG_STATE_HOME/cecunsplash/`).
 
 ## Run the test suite
 

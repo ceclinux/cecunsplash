@@ -24,8 +24,9 @@ type App struct {
 	Client *unsplash.Client
 	Logger *log.Logger
 
-	mu      sync.Mutex
-	running bool
+	mu          sync.Mutex
+	running     bool
+	lastFailure time.Time
 
 	// WaitForNetworkFn overrides the network-wait function used by ChangeAll.
 	// When nil, the package-level WaitForNetwork is used. Tests set this to a
@@ -44,6 +45,39 @@ func New(cfg config.Config, logger *log.Logger) *App {
 // SetClient replaces the Unsplash client. It is exported for tests and for
 // embedded integrations that need to point the client at a custom base URL.
 func (a *App) SetClient(c *unsplash.Client) { a.Client = c }
+
+// failureRetryDelay is how long the scheduler waits after a failed change
+// before trying again. Without a backoff, an unschedulable change (no backend,
+// rate limit, ...) re-queues every minute and downloads a fresh image each time.
+const failureRetryDelay = 15 * time.Minute
+
+// markFailure records a failed change so the scheduler backs off.
+func (a *App) markFailure() {
+	a.mu.Lock()
+	a.lastFailure = time.Now()
+	a.mu.Unlock()
+}
+
+// clearFailure resets the backoff after a successful change.
+func (a *App) clearFailure() {
+	a.mu.Lock()
+	a.lastFailure = time.Time{}
+	a.mu.Unlock()
+}
+
+// failureRetryIn reports how long to wait before retrying after a failure.
+func (a *App) failureRetryIn(delay time.Duration) time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lastFailure.IsZero() {
+		return 0
+	}
+	wait := delay - time.Since(a.lastFailure)
+	if wait < 0 {
+		return 0
+	}
+	return wait
+}
 
 func (a *App) ChangeAll(ctx context.Context) error {
 	a.mu.Lock()
@@ -73,7 +107,7 @@ func (a *App) ChangeAll(ctx context.Context) error {
 	if desktops < 1 {
 		desktops = 1
 	}
-	a.logf("found %d desktop workspace(s)", desktops)
+	a.logf("found %d wallpaper target(s)", desktops)
 
 	state := LoadState()
 	photos, err := a.fetchEnoughPhotos(ctx, desktops, state)
@@ -115,7 +149,7 @@ func (a *App) ChangeAll(ctx context.Context) error {
 	state.Photos = saved
 	state.UsedPhotoIDs = history
 	_ = SaveState(state)
-	a.logf("updated %d workspace wallpaper(s)", desktops)
+	a.logf("updated %d wallpaper(s)", desktops)
 	return nil
 }
 
@@ -303,8 +337,10 @@ func (a *App) RunDaemon(ctx context.Context) error {
 			err := a.ChangeAll(changeCtx)
 			cancel()
 			if err != nil {
-				a.logf("wallpaper change failed: %v", err)
+				a.markFailure()
+				a.logf("wallpaper change failed: %v; retrying in %s", err, failureRetryDelay)
 			} else {
+				a.clearFailure()
 				a.logf("wallpaper change complete")
 			}
 		}
@@ -315,6 +351,16 @@ func (a *App) scheduleLoop(ctx context.Context, requests chan<- string) {
 	for {
 		next, dueNow := a.nextChangeTime(time.Now())
 		if dueNow {
+			if wait := a.failureRetryIn(failureRetryDelay); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+				continue
+			}
 			a.queueRequest(ctx, requests, "missed schedule")
 		} else {
 			a.logf("next scheduled change at %s", next.Format(time.RFC1123))
